@@ -1,0 +1,663 @@
+
+
+=== config.py ===
+
+
+=== data_loader.py ===
+import os
+import pandas as pd
+import numpy as np
+import yfinance as yf
+
+CACHE_DIR = "cache"
+EARNINGS_CACHE_DIR = os.path.join(CACHE_DIR, "earnings")
+
+# ETFs never have single-company earnings risk
+ETF_SYMBOLS = {
+    "SPY", "QQQ", "IWM", "SMH", "XLV", "XLI", "XLE", "XLK",
+    "XLP", "XLU", "XLB", "XLY", "XLF", "DIA", "MDY", "SOXX",
+    "IGV", "XBI", "XHB", "XRT", "XOP", "KRE", "ITA"
+}
+
+def _get_cached_price(symbol: str, start_date: str) -> pd.DataFrame:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(CACHE_DIR, f"{symbol}_{start_date}.csv")
+    if os.path.exists(cache_file):
+        try:
+            df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+            if not df.empty and len(df) >= 50:
+                return df
+        except Exception:
+            pass
+
+    ticker = yf.Ticker(symbol)
+    df = ticker.history(start=start_date, auto_adjust=True)
+    if df.empty:
+        return pd.DataFrame()
+
+    df.columns = [c.lower() for c in df.columns]
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    df.index = df.index.normalize()
+    df.to_csv(cache_file)
+    return df
+
+def _get_earnings_dates(symbol: str) -> list[pd.Timestamp]:
+    if symbol.upper() in ETF_SYMBOLS:
+        return []
+
+    os.makedirs(EARNINGS_CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(EARNINGS_CACHE_DIR, f"{symbol}_earnings.csv")
+
+    if os.path.exists(cache_file):
+        try:
+            edf = pd.read_csv(cache_file)
+            if "earnings_date" in edf.columns:
+                return [pd.to_datetime(d) for d in edf["earnings_date"].dropna().tolist()]
+        except Exception:
+            pass
+
+    try:
+        ticker = yf.Ticker(symbol)
+        ed = ticker.get_earnings_dates(limit=60)
+        if ed is not None and not ed.empty:
+            raw_dates = ed.index.tolist()
+            save_df = pd.DataFrame({"earnings_date": [str(d) for d in raw_dates]})
+            save_df.to_csv(cache_file, index=False)
+            return [pd.to_datetime(d) for d in raw_dates]
+    except Exception:
+        pass
+
+    return []
+
+def get_historical_data(symbol: str, start_date: str = "2023-01-01") -> pd.DataFrame:
+    df = _get_cached_price(symbol, start_date)
+    if df.empty:
+        return df
+
+    df["earnings_exit"] = False
+    df["earnings_blackout"] = False
+
+    if symbol.upper() in ETF_SYMBOLS:
+        return df
+
+    earnings_raw = _get_earnings_dates(symbol)
+    if not earnings_raw:
+        return df
+
+    trading_dates_list = df.index.tolist()
+    exit_days = set()
+
+    for ts in earnings_raw:
+        hour = ts.hour if hasattr(ts, "hour") else 0
+        date = ts.tz_localize(None).normalize() if ts.tzinfo is not None else ts.normalize()
+
+        if hour >= 12:  # After Market Close
+            prior_tds = [d for d in trading_dates_list if d <= date]
+            if prior_tds: exit_days.add(prior_tds[-1])
+        else:           # Before Market Open
+            prior_tds = [d for d in trading_dates_list if d < date]
+            if prior_tds: exit_days.add(prior_tds[-1])
+
+    df["earnings_exit"] = [d in exit_days for d in df.index]
+
+    # Block entries 5 days prior to an earnings announcement
+    is_exit = df["earnings_exit"].values
+    blackout = np.zeros(len(df), dtype=bool)
+    exit_indices = np.where(is_exit)[0]
+    blackout_window = 5
+
+    for idx in exit_indices:
+        start_idx = max(0, idx - blackout_window)
+        blackout[start_idx : idx + 1] = True
+
+    df["earnings_blackout"] = blackout
+    return df
+
+=== market_scanner.py ===
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+
+# Curated Universe: Mega-caps, High-Beta Tech, Broad Indices, and Sector Leaders
+TICKERS = [
+    "SPY", "QQQ", "DIA", "IWM", "SMH", "XLF", "XLE", "XLV", 
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", 
+    "AVGO", "NFLX", "AMD", "QCOM", "NOW", "PANW", "CRWD",
+    "COST", "WMT", "JPM", "V", "MA", "UNH", "LLY", "XOM"
+]
+
+def analyze_ticker(ticker):
+    try:
+        df = yf.download(ticker, period="2y", interval="1d", progress=False)
+        if df.empty or 'Close' not in df.columns:
+            return None
+            
+        # Flatten MultiIndex columns if present (yfinance latest version fix)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df = df.dropna(subset=['Close']).copy()
+        
+        # Calculate Indicators
+        df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+        df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=4).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=4).mean()
+        rs = gain / loss
+        df['RSI_4'] = 100 - (100 / (1 + rs))
+        
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['ATR_14'] = tr.rolling(window=14).mean()
+        
+        # Regimes
+        df['Uptrend'] = (df['EMA_20'] > df['EMA_50']) & (df['EMA_50'] > df['EMA_200'])
+        df['Sideways_Down'] = ~df['Uptrend']
+        
+        # Setup Definitions
+        df['Entry_Trend'] = (df['Low'] <= df['EMA_20']) & (df['Close'] > df['EMA_20']) & df['Uptrend']
+        df['Dist_from_50'] = (df['EMA_50'] - df['Close']) / df['EMA_50']
+        df['Entry_Reversion'] = (df['RSI_4'] < 30) & df['Sideways_Down'] & (df['Dist_from_50'] > 0.03)
+
+        last = df.iloc[-1]
+        setup_triggered = None
+        
+        if last['Entry_Trend']:
+            setup_triggered = 'Trend (1.5R)'
+            target_mult = 1.5
+            signal_col = 'Entry_Trend'
+        elif last['Entry_Reversion']:
+            setup_triggered = 'Rubber Band (2.0R)'
+            target_mult = 2.0
+            signal_col = 'Entry_Reversion'
+        else:
+            return None # Skip tickers with no setup today
+
+        # Backtest the specific setup that triggered today
+        trades = 0
+        wins = 0
+        signals = df[df[signal_col]].index
+        
+        for idx in signals:
+            row_num = df.index.get_loc(idx)
+            if row_num >= len(df) - 1:
+                continue
+                
+            entry_price = df.iloc[row_num + 1]['Open']
+            atr = df.iloc[row_num]['ATR_14']
+            if pd.isna(atr): continue
+            
+            risk = 1.5 * atr
+            stop = entry_price - risk
+            target = entry_price + (target_mult * risk)
+            
+            hit = False
+            for fwd in range(row_num + 1, len(df)):
+                if df.iloc[fwd]['Low'] <= stop:
+                    break
+                if df.iloc[fwd]['High'] >= target:
+                    hit = True
+                    break
+                    
+            trades += 1
+            if hit: wins += 1
+
+        win_rate = (wins / trades) * 100 if trades > 0 else 0
+        
+        return {
+            'Ticker': ticker,
+            'Setup': setup_triggered,
+            'Close': last['Close'],
+            'Win Rate': f"{win_rate:.1f}%",
+            'Hist Trades': trades
+        }
+        
+    except Exception as e:
+        return None
+
+print("Scanning 30 high-quality institutional tickers for today's setups...")
+results = []
+for ticker in TICKERS:
+    res = analyze_ticker(ticker)
+    if res:
+        # Only keep setups with a historical edge > 50%
+        if float(res['Win Rate'].strip('%')) >= 50.0:
+            results.append(res)
+
+if results:
+    df_res = pd.DataFrame(results).sort_values(by='Win Rate', ascending=False)
+    print("\n=== HIGH PROBABILITY SETUPS FOUND TODAY ===")
+    print(df_res.to_string(index=False))
+else:
+    print("\nNo high-probability setups triggered today. Keep your capital safe in cash.")
+
+=== portfolio_engine.py ===
+import pandas as pd
+import numpy as np
+
+class PortfolioBacktester:
+    def __init__(
+        self,
+        strategy,
+        starting_capital: float = 1000.0,
+        risk_pct: float = 0.02,
+        max_positions: int = 2,
+        allow_fractional: bool = True,
+        min_risk_pct: float = 0.020,
+        require_spy_regime: bool = True,
+        stale_bars: int = 14
+    ):
+        self.strategy = strategy
+        self.starting_capital = starting_capital
+        self.risk_pct = risk_pct
+        self.max_positions = max_positions
+        self.allow_fractional = allow_fractional
+        self.min_risk_pct = min_risk_pct
+        self.require_spy_regime = require_spy_regime
+        self.stale_bars = stale_bars
+
+    def run(self, ticker_data: dict[str, pd.DataFrame]) -> dict:
+        spy_df = ticker_data.get("SPY")
+        if spy_df is not None:
+            spy_sma50 = spy_df["close"].rolling(50).mean()
+        else:
+            spy_sma50 = None
+
+        signals = {}
+        for sym, df in ticker_data.items():
+            if len(df) >= 50:
+                try:
+                    signals[sym] = self.strategy.generate_signals(df, spy_df=spy_df)
+                except TypeError:
+                    signals[sym] = self.strategy.generate_signals(df)
+
+        if not signals: return {"error": "No valid data"}
+
+        all_dates = sorted(list(set.union(*[set(df.index) for df in signals.values()])))
+
+        cash = self.starting_capital
+        settled_cash = self.starting_capital
+        open_positions = {}
+        trades = []
+        equity_curve = []
+        pending_settlements = []
+
+        for i in range(1, len(all_dates)):
+            curr_date = all_dates[i]
+            prev_date = all_dates[i - 1]
+
+            new_settlements = []
+            for avail_date, amt in pending_settlements:
+                if curr_date >= avail_date: settled_cash += amt
+                else: new_settlements.append((avail_date, amt))
+            pending_settlements = new_settlements
+
+            closed_this_bar = []
+            for sym, pos in list(open_positions.items()):
+                df = signals[sym]
+                if curr_date not in df.index:
+                    pos["bars_held"] += 1
+                    continue
+
+                curr_row = df.loc[curr_date]
+                entry_p = pos["entry_price"]
+                stop_p = pos["stop_loss"]
+                r1_p = pos["target_1r"]
+                r2_p = pos["target_2r"]
+                r_val = pos["risk_per_share"]
+                shares = pos["shares"]
+
+                if curr_row["open"] <= stop_p:
+                    pos["lowest_price"] = min(pos["lowest_price"], float(curr_row["open"]))
+                    pos["highest_price"] = max(pos["highest_price"], float(curr_row["open"]))
+                    t = self._record_exit(pos, float(curr_row["open"]), curr_date, "STOP_GAP", entry_p, r_val, shares)
+                    trades.append(t)
+                    pending_settlements.append((curr_date, t["exit"] * shares))
+                    closed_this_bar.append(sym)
+                    continue
+
+                pos["highest_price"] = max(pos["highest_price"], float(curr_row["high"]))
+                pos["lowest_price"] = min(pos["lowest_price"], float(curr_row["low"]))
+
+                if curr_row["low"] <= stop_p:
+                    reason = "BREAKEVEN" if abs(stop_p - entry_p) < 0.02 else "STOP_LOSS"
+                    t = self._record_exit(pos, stop_p, curr_date, reason, entry_p, r_val, shares)
+                    trades.append(t)
+                    pending_settlements.append((curr_date, stop_p * shares))
+                    closed_this_bar.append(sym)
+                    continue
+
+                if curr_row["high"] >= r2_p:
+                    t = self._record_exit(pos, r2_p, curr_date, "TARGET_2R", entry_p, r_val, shares)
+                    trades.append(t)
+                    pending_settlements.append((curr_date, r2_p * shares))
+                    closed_this_bar.append(sym)
+                    continue
+
+                if curr_row["high"] >= r1_p and stop_p < entry_p:
+                    pos["stop_loss"] = entry_p
+
+                if self.stale_bars > 0 and pos["bars_held"] >= self.stale_bars and pos["stop_loss"] < entry_p:
+                    t = self._record_exit(pos, float(curr_row["close"]), curr_date, "STALE_EXIT", entry_p, r_val, shares)
+                    trades.append(t)
+                    pending_settlements.append((curr_date, t["exit"] * shares))
+                    closed_this_bar.append(sym)
+                    continue
+
+                # Earnings Defense Exit
+                if curr_row.get("earnings_exit", False):
+                    t = self._record_exit(pos, float(curr_row["close"]), curr_date, "EARNINGS_EXIT", entry_p, r_val, shares)
+                    trades.append(t)
+                    pending_settlements.append((curr_date, t["exit"] * shares))
+                    closed_this_bar.append(sym)
+                    continue
+
+                pos["bars_held"] += 1
+
+            for sym in closed_this_bar:
+                del open_positions[sym]
+
+            open_val = sum(signals[s].loc[curr_date]["close"] * p["shares"] for s, p in open_positions.items() if curr_date in signals[s].index)
+            current_equity = round(settled_cash + open_val + sum(amt for _, amt in pending_settlements), 2)
+            equity_curve.append({"date": curr_date, "equity": current_equity})
+
+            is_market_bullish = True
+            if self.require_spy_regime and spy_sma50 is not None:
+                if prev_date in spy_sma50.index and prev_date in spy_df.index:
+                    is_market_bullish = spy_df.loc[prev_date, "close"] > spy_sma50.loc[prev_date]
+
+            available_slots = self.max_positions - len(open_positions)
+            if available_slots > 0 and settled_cash > 10.0 and is_market_bullish:
+                candidates = []
+                for sym, df in signals.items():
+                    if sym in open_positions: continue
+                    if prev_date in df.index and curr_date in df.index:
+                        prev_bar = df.loc[prev_date]
+                        curr_bar = df.loc[curr_date]
+
+                        # Verify setup and ensure no impending earnings announcement
+                        if prev_bar.get("setup_valid", False) and not curr_bar.get("earnings_blackout", False):
+                            dist = abs(prev_bar["close"] - prev_bar["ema20"]) / prev_bar["ema20"]
+                            candidates.append((sym, dist, curr_bar, prev_bar))
+
+                # Sort by tightest pullback to the 20 EMA
+                candidates.sort(key=lambda x: x[1])
+
+                for sym, _, curr_bar, prev_bar in candidates[:available_slots]:
+                    entry_p = curr_bar["open"]
+                    
+                    # Original Strict Sizing Logic (No ATR Widening)
+                    raw_stop = prev_bar.get("planned_stop", entry_p * 0.98)
+                    dist_raw = entry_p - raw_stop
+                    dist_floor = entry_p * self.min_risk_pct
+                    
+                    risk_per_share = max(dist_raw, dist_floor)
+                    stop_p = entry_p - risk_per_share
+
+                    max_pos_cost = current_equity / self.max_positions
+                    target_risk_dollars = current_equity * (self.risk_pct / self.max_positions)
+                    ideal_shares = target_risk_dollars / risk_per_share
+                    position_cost = ideal_shares * entry_p
+
+                    allowed_cost = min(position_cost, max_pos_cost, settled_cash)
+                    if allowed_cost < 5.0: continue
+
+                    actual_shares = allowed_cost / entry_p
+                    if not self.allow_fractional: actual_shares = int(actual_shares)
+                    if actual_shares <= 0 or (actual_shares * entry_p) < 5.0: continue
+
+                    settled_cash -= actual_shares * entry_p
+                    open_positions[sym] = {
+                        "symbol": sym, "entry_date": curr_date, "entry_price": entry_p,
+                        "stop_loss": stop_p, "risk_per_share": risk_per_share,
+                        "target_1r": round(entry_p + risk_per_share, 2), 
+                        "target_2r": round(entry_p + (2.0 * risk_per_share), 2),
+                        "shares": round(actual_shares, 4) if self.allow_fractional else actual_shares,
+                        "bars_held": 0, "highest_price": float(curr_bar["high"]), "lowest_price": float(curr_bar["low"])
+                    }
+
+        return self._generate_portfolio_report(trades, equity_curve)
+
+    def _record_exit(self, pos, exit_p, date, reason, entry_p, r_val, shares):
+        r_mult = round((exit_p - entry_p) / r_val, 2)
+        pnl = round((exit_p - entry_p) * shares, 2)
+        mfe_r = round((pos["highest_price"] - entry_p) / r_val, 2)
+        mae_r = round((entry_p - pos["lowest_price"]) / r_val, 2)
+        entry_date_str = pos["entry_date"].strftime("%Y-%m-%d") if hasattr(pos["entry_date"], "strftime") else str(pos["entry_date"])[:10]
+        exit_date_str = date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else str(date)[:10]
+        return {
+            "symbol": pos["symbol"], "entry_date": entry_date_str, "exit_date": exit_date_str,
+            "entry": round(pos["entry_price"], 2), "exit": round(exit_p, 2), "risk_per_share": round(r_val, 2),
+            "reason": reason, "r_multiple": r_mult, "mfe_r": mfe_r, "mae_r": mae_r, "pnl": pnl, "bars": pos["bars_held"]
+        }
+
+    def _generate_portfolio_report(self, trades, equity_curve):
+        if not trades: return {"total_trades": 0, "final_balance": self.starting_capital}
+        tdf = pd.DataFrame(trades)
+        eq_df = pd.DataFrame(equity_curve)
+        wins = tdf[tdf["r_multiple"] > 0]
+        losses = tdf[tdf["r_multiple"] < 0]
+        be = tdf[tdf["r_multiple"] == 0]
+        final_eq = eq_df["equity"].iloc[-1] if not eq_df.empty else self.starting_capital
+        net_profit = final_eq - self.starting_capital
+        total_return_pct = (net_profit / self.starting_capital) * 100
+        eq_df["peak"] = eq_df["equity"].cummax()
+        eq_df["drawdown"] = (eq_df["equity"] - eq_df["peak"]) / eq_df["peak"]
+        max_dd = eq_df["drawdown"].min() * 100
+        win_rate = (len(wins) / len(tdf)) * 100
+        gross_gains = wins["pnl"].sum()
+        gross_losses = abs(losses["pnl"].sum())
+        profit_factor = round(gross_gains / gross_losses, 2) if gross_losses > 0 else np.nan
+        return {
+            "starting_capital": self.starting_capital, "final_balance": round(final_eq, 2),
+            "net_profit": round(net_profit, 2), "total_return_pct": f"{total_return_pct:+.2f}%",
+            "max_drawdown": f"{max_dd:.2f}%", "total_trades": len(tdf), "wins": len(wins),
+            "losses": len(losses), "breakeven": len(be), "win_rate": f"{win_rate:.1f}%",
+            "profit_factor": profit_factor, "trades_df": tdf
+        }
+
+=== run_vwap.py ===
+import argparse
+import pandas as pd
+from data_loader import get_historical_data
+from strategies.vwap_shelf import VWAPEMAShelfStrategy
+from portfolio_engine import PortfolioBacktester
+
+# The Exact 30-Ticker High-Profit Universe
+EXPANDED_UNIVERSE = [
+    # Core Index & Sector ETFs (Liquidity Foundation)
+    "SPY", "QQQ", "IWM", "SMH", "XLV", "XLI", "XLE",
+    # MegaCap Tech & Cloud Momentum
+    "AAPL", "NVDA", "META", "AMZN", "GOOGL",
+    # High-Performance Semiconductor Leaders (Removed QCOM)
+    "AMAT", "LRCX", "AVGO", "ADI", "MU",
+    # Healthcare & Biotech Trends
+    "LLY", "MRK", "UNH", "AMGN", "TMO",
+    # Financial Leaders (Kept V, GS, BLK; Removed AXP, MA, JPM)
+    "BLK", "GS", "V",
+    # Industrials & Defense (Kept CAT, UNP, PH; Removed ETN, GE)
+    "CAT", "UNP", "PH",
+    # Quality Retail & Consumer
+    "COST", "HD"
+]
+
+def main():
+    parser = argparse.ArgumentParser(description="VWAP Simulation")
+    parser.add_argument("--slots", type=int, default=2)
+    parser.add_argument("--stale", type=int, default=14)
+    args = parser.parse_args()
+
+    print(f"Loading historical bars and earnings data for {len(EXPANDED_UNIVERSE)} symbols...")
+    data = {}
+    for idx, sym in enumerate(EXPANDED_UNIVERSE, 1):
+        print(f"[{idx:02d}/{len(EXPANDED_UNIVERSE)}] Processing {sym}...", end="\r", flush=True)
+        df = get_historical_data(sym, start_date="2023-01-01")
+        if not df.empty and len(df) >= 50:
+            data[sym] = df
+    print(f"\nSuccessfully loaded {len(data)} tickers.")
+
+    sim = PortfolioBacktester(
+        VWAPEMAShelfStrategy(),
+        starting_capital=1000,
+        risk_pct=0.02,
+        max_positions=args.slots,
+        allow_fractional=True,
+        min_risk_pct=0.02,
+        require_spy_regime=True,
+        stale_bars=args.stale
+    )
+
+    res = sim.run(data)
+
+    print("\n=======================================================")
+    print(f" CURATED UNIVERSE ({args.slots} SLOTS | STALE STOP: {args.stale} BARS)")
+    print("=======================================================")
+    print(f"Starting Balance: ${res['starting_capital']:.2f}")
+    print(f"Final Balance:    ${res['final_balance']:.2f}")
+    print(f"Net Profit:       ${res['net_profit']:+.2f} ({res['total_return_pct']})")
+    print(f"Total Trades:     {res['total_trades']}")
+    print(f"Win Rate:         {res['win_rate']}")
+    print(f"Profit Factor:    {res['profit_factor']}")
+    print(f"Max Drawdown:     {res['max_drawdown']}")
+    print("\n--- EXIT REASONS ---")
+    print(res["trades_df"]["reason"].value_counts())
+
+    res["trades_df"].to_csv("backtest_vwap_detailed.csv", index=False)
+    print("\nTrade log saved to backtest_vwap_detailed.csv")
+
+if __name__ == "__main__":
+    main()
+
+=== strategies/base.py ===
+from abc import ABC, abstractmethod
+import pandas as pd
+
+class BaseStrategy(ABC):
+    def __init__(self, name: str):
+        self.name = name
+
+    @abstractmethod
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Takes raw OHLCV and returns a DataFrame with signal metadata:
+        setup_valid, entry_price, stop_loss, target_1r, target_2r
+        """
+        pass
+
+=== strategies/ema_shelf.py ===
+import pandas as pd
+import numpy as np
+from strategies.base import BaseStrategy
+
+class EMAShelfStrategy(BaseStrategy):
+    def __init__(self, ema_period: int = 20, sma_period: int = 50):
+        super().__init__(name="20EMA_50SMA_Pullback_Pure2R")
+        self.ema_period = ema_period
+        self.sma_period = sma_period
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        data = df.copy()
+
+        # Indicators
+        data["ema20"] = data["close"].ewm(span=self.ema_period, adjust=False).mean()
+        data["sma50"] = data["close"].rolling(window=self.sma_period).mean()
+
+        # Setup Conditions:
+        # 1. Structural Uptrend: Close > 50 SMA and 20 EMA > 50 SMA
+        uptrend = (data["close"] > data["sma50"]) & (data["ema20"] > data["sma50"])
+
+        # 2. Pullback test: Candle low penetrates or tags within 0.3% of 20 EMA
+        touches_ema = (data["low"] <= data["ema20"] * 1.003) & (data["close"] >= data["ema20"] * 0.990)
+
+        # 3. Bullish Defense: Close finishes in the top 50% of the daily range (rejection tail)
+        candle_range = data["high"] - data["low"]
+        strong_close = np.where(candle_range > 0, (data["close"] - data["low"]) / candle_range >= 0.40, False)
+
+        data["setup_valid"] = uptrend & touches_ema & strong_close
+
+        # Signal geometry calculated on signal bar close
+        # Entry assumed at next bar open; initial stop at signal bar low
+        data["planned_stop"] = data["low"]
+        
+        return data
+
+=== strategies/__init__.py ===
+
+
+=== strategies/vwap_shelf.py ===
+import pandas as pd
+import numpy as np
+from strategies.base import BaseStrategy
+
+class VWAPEMAShelfStrategy(BaseStrategy):
+    def __init__(self, ema_period: int = 20, sma_period: int = 50):
+        super().__init__(name="20EMA_WeeklyVWAP_RS_System")
+        self.ema_period = ema_period
+        self.sma_period = sma_period
+
+    def generate_signals(self, df: pd.DataFrame, spy_df: pd.DataFrame = None) -> pd.DataFrame:
+        data = df.copy()
+
+        # Moving Averages
+        data["ema20"] = data["close"].ewm(span=self.ema_period, adjust=False).mean()
+        data["sma50"] = data["close"].rolling(window=self.sma_period).mean()
+
+        # -------------------------------------------------------------
+        # 1. WEEKLY ANCHORED VWAP
+        # -------------------------------------------------------------
+        # Identify start of each week (grouping key: year + week number)
+        if not isinstance(data.index, pd.DatetimeIndex):
+            data.index = pd.to_datetime(data.index)
+
+        data["week_id"] = data.index.to_period("W")
+        typical_price = (data["high"] + data["low"] + data["close"]) / 3.0
+        pv = typical_price * data["volume"]
+
+        # Cumulative volume and price-volume resetting weekly
+        cum_pv = pv.groupby(data["week_id"]).cumsum()
+        cum_vol = data["volume"].groupby(data["week_id"]).cumsum()
+        data["weekly_vwap"] = np.where(cum_vol > 0, cum_pv / cum_vol, data["close"])
+
+        # -------------------------------------------------------------
+        # 2. RELATIVE STRENGTH VS SPY (20-bar lookback)
+        # -------------------------------------------------------------
+        if spy_df is not None:
+            spy_data = spy_df.copy()
+            if not isinstance(spy_data.index, pd.DatetimeIndex):
+                spy_data.index = pd.to_datetime(spy_data.index)
+
+            data["ret_20"] = data["close"] / data["close"].shift(20)
+            spy_ret_20 = spy_data["close"] / spy_data["close"].shift(20)
+            data["spy_ret_20"] = spy_ret_20.reindex(data.index).ffill()
+            data["rs_positive"] = data["ret_20"] >= data["spy_ret_20"]
+        else:
+            data["rs_positive"] = True
+
+        # -------------------------------------------------------------
+        # 3. SETUP CONDITIONS
+        # -------------------------------------------------------------
+        # Structural Uptrend: Above 50 SMA and 20 EMA > 50 SMA
+        uptrend = (data["close"] > data["sma50"]) & (data["ema20"] > data["sma50"])
+
+        # EMA Pullback Test
+        touches_ema = (data["low"] <= data["ema20"] * 1.003) & (data["close"] >= data["ema20"] * 0.990)
+
+        # Bullish Rejection: Close in upper 40% of bar
+        candle_range = data["high"] - data["low"]
+        strong_close = np.where(candle_range > 0, (data["close"] - data["low"]) / candle_range >= 0.40, False)
+
+        # Institutional Defense: Close must hold above Weekly VWAP
+        above_wvwap = data["close"] >= data["weekly_vwap"]
+
+        data["setup_valid"] = uptrend & touches_ema & strong_close & above_wvwap & data["rs_positive"]
+        data["planned_stop"] = data["low"]
+
+        return data
