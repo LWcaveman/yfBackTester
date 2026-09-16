@@ -92,7 +92,18 @@ def parse_args():
         "--min-close-pct",
         type=float,
         default=0.60,
-        help="Minimum candle close percentile (e.g., 0.60 for upper 40%% of daily range)",
+        help="Minimum candle close percentile (default: 0.60 for upper 40%% of candle range)",
+    )
+    parser.add_argument(
+        "--min-vol-ratio",
+        type=float,
+        default=0.80,
+        help="Minimum volume relative to 10-bar SMA on 1m cross (default: 0.80)",
+    )
+    parser.add_argument(
+        "--no-ratchet",
+        action="store_true",
+        help="Disable +1.5R breakeven ratchet defense",
     )
     parser.add_argument(
         "--sync-intraday",
@@ -121,7 +132,7 @@ def parse_args():
 def run_intraday_backtest(args, tickers):
     print("\n" + "=" * 65)
     print(" EXECUTING 1-MINUTE INTRADAY SIMULATION (Data Vault)")
-    print(f" Universe: {tickers} | Risk: {args.risk}%")
+    print(f" Universe: {tickers} | Risk: {args.risk}% | 1 Trade/Day Policy")
     print("=" * 65)
 
     sim = FashionablyLatePortfolio(
@@ -131,6 +142,9 @@ def run_intraday_backtest(args, tickers):
         max_trades_per_day=1,
         morning_cutoff="10:45",
         midday_max_unit_pct=0.0075,
+        min_close_pct=args.min_close_pct,
+        min_vol_ratio=args.min_vol_ratio,
+        ratchet_1_5r=not args.no_ratchet,
     )
     sim.generate_signals()
     sim.run_portfolio_simulation()

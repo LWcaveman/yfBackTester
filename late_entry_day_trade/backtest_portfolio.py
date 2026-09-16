@@ -13,7 +13,10 @@ class FashionablyLatePortfolio:
         risk_pct=0.02,
         max_trades_per_day: int = 1,
         morning_cutoff: str = "10:45",
-        midday_max_unit_pct: float = 0.0075
+        midday_max_unit_pct: float = 0.0075,
+        min_close_pct: float = 0.60,
+        min_vol_ratio: float = 0.80,
+        ratchet_1_5r: bool = True
     ):
         self.tickers = tickers
         self.start_capital = start_capital
@@ -21,6 +24,9 @@ class FashionablyLatePortfolio:
         self.max_trades_per_day = max_trades_per_day
         self.morning_cutoff = datetime.strptime(morning_cutoff, "%H:%M").time() if isinstance(morning_cutoff, str) else morning_cutoff
         self.midday_max_unit_pct = midday_max_unit_pct
+        self.min_close_pct = min_close_pct
+        self.min_vol_ratio = min_vol_ratio
+        self.ratchet_1_5r = ratchet_1_5r
         
         self.raw_signals = []
         self.executed_trades = []
@@ -37,13 +43,14 @@ class FashionablyLatePortfolio:
     def _scan_ticker(self, ticker, df):
         df['Prev_EMA_9'] = df['EMA_9'].shift(1)
         df['Prev_VWAP'] = df['VWAP'].shift(1)
+        df['Vol_SMA10'] = df['Volume'].rolling(10).mean()
         
         in_trade = False
         entry_price = stop_loss = target = unit = 0.0
         entry_time = None
         entry_idx = 0
         
-        for i in range(1, len(df)):
+        for i in range(10, len(df)):
             row = df.iloc[i]
             current_time = row['Time']
             current_dt = row['Datetime']
@@ -51,9 +58,16 @@ class FashionablyLatePortfolio:
             if in_trade:
                 mins_in_trade = i - entry_idx
                 
-                # Pessimistic Backtesting: Assume stop loss is hit before target if both occur in the same minute
+                # +1.5R Breakeven Ratchet (Protects small account gains)
+                if self.ratchet_1_5r and stop_loss < entry_price:
+                    half_target = entry_price + (unit * 0.5)  # +1.5R in 3:1 geometry
+                    if row['High'] >= half_target:
+                        stop_loss = entry_price  # Ratchet stop to Breakeven
+                
+                # Stop Loss check
                 if row['Low'] <= stop_loss:
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, stop_loss, "STOP_LOSS", unit)
+                    reason = "BREAKEVEN" if abs(stop_loss - entry_price) < 0.02 else "STOP_LOSS"
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, stop_loss, reason, unit)
                     in_trade = False
                     continue
                     
@@ -87,6 +101,17 @@ class FashionablyLatePortfolio:
                 near_10 = abs(row['Close'] - row['SMA_10']) / row['SMA_10'] < 0.03
                 
                 if near_5 or near_10:
+                    # 1. Bullish Close Filter (Must close in upper 40% of candle range)
+                    c_range = row['High'] - row['Low']
+                    cpct = (row['Close'] - row['Low']) / c_range if c_range > 0 else 0.5
+                    if cpct < self.min_close_pct:
+                        continue
+
+                    # 2. Volume Participation Filter (>= min_vol_ratio x 10-bar SMA)
+                    vol_sma = row['Vol_SMA10']
+                    if vol_sma > 0 and (row['Volume'] / vol_sma) < self.min_vol_ratio:
+                        continue
+
                     lod = row['LOD']
                     entry_price = row['Close']
                     if entry_price <= lod: continue # Data anomaly failsafe
@@ -107,6 +132,7 @@ class FashionablyLatePortfolio:
             'Exit Time': exit_dt,
             'Entry Price': entry_price,
             'Stop Loss': stop_loss,
+            'Initial Stop': entry_price - (unit / 3.0),
             'Exit Price': exit_price,
             'Reason': reason,
             'Unit': unit,
@@ -140,7 +166,8 @@ class FashionablyLatePortfolio:
             if locked_until is not None and sig['Entry Time'] < locked_until:
                 continue
                 
-            stop_dist = sig['Entry Price'] - sig['Stop Loss']
+            # Initial stop distance (1/3 unit) for position sizing
+            stop_dist = sig['Unit'] / 3.0
             if stop_dist <= 0: continue
             
             # Position Sizing Math
@@ -223,11 +250,26 @@ if __name__ == "__main__":
     import sys, os
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     try:
-        from config import DAYTRADE_TICKERS as tickers
+        from config import (
+            DAYTRADE_TICKERS as tickers,
+            DEFAULT_DAYTRADE_MIN_CLOSE_PCT,
+            DEFAULT_DAYTRADE_MIN_VOL_RATIO,
+            DEFAULT_DAYTRADE_RATCHET_1_5R,
+        )
     except ImportError:
         # Curated Elite Day-Trading Universe
         tickers = ["ARM", "HOOD", "PLTR", "AMZN", "AAPL", "GOOGL"]
+        DEFAULT_DAYTRADE_MIN_CLOSE_PCT = 0.60
+        DEFAULT_DAYTRADE_MIN_VOL_RATIO = 0.80
+        DEFAULT_DAYTRADE_RATCHET_1_5R = True
     
-    sim = FashionablyLatePortfolio(tickers, start_capital=1000.0, risk_pct=0.02)
+    sim = FashionablyLatePortfolio(
+        tickers,
+        start_capital=1000.0,
+        risk_pct=0.02,
+        min_close_pct=DEFAULT_DAYTRADE_MIN_CLOSE_PCT,
+        min_vol_ratio=DEFAULT_DAYTRADE_MIN_VOL_RATIO,
+        ratchet_1_5r=DEFAULT_DAYTRADE_RATCHET_1_5R
+    )
     sim.generate_signals()
     sim.run_portfolio_simulation()

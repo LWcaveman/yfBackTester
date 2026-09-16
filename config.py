@@ -58,6 +58,11 @@ DAYTRADE_TICKERS = [
     "ARM", "HOOD", "PLTR", "AMZN", "AAPL", "GOOGL"
 ]
 
+# Day-Trading Edge Parameters (Small Cash Account Optimized)
+DEFAULT_DAYTRADE_MIN_CLOSE_PCT: float = 0.60
+DEFAULT_DAYTRADE_MIN_VOL_RATIO: float = 0.80
+DEFAULT_DAYTRADE_RATCHET_1_5R: bool = True
+
 # Market Scanner Universe (market_scanner.py)
 SCANNER_TICKERS = [
     "SPY", "QQQ", "DIA", "IWM", "SMH", "XLF", "XLE", "XLV",
