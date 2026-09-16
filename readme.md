@@ -1,26 +1,24 @@
 # yfBackTester
 
-Standalone backtesting framework designed to simulate and validate swing trading setups against historical OHLCV data via `yfinance`. Operates locally without broker authentication or live API keys.
+Standalone algorithmic backtesting and quantitative market scanning framework designed to simulate, validate, and screen swing trading and intraday setups using historical OHLCV data via `yfinance`. Operates entirely locally without broker authentication or live API keys.
 
 ---
 
 ## Environment Setup
 
-Because `yfinance` requires `curl_cffi>=0.15`, the virtual environment must run on **Python 3.11+**.
+Because `yfinance` requires modern async TLS libraries (`curl_cffi>=0.15`), the virtual environment must run on **Python 3.11+**.
 
 ```bash
 cd ~/yfBackTester
 
-# 1. Create .venv using the Python 3.11 binary from rhTrader
-~/rhTrader/venv/bin/python -m venv .venv
-
-# 2. Activate virtual environment
+# 1. Activate existing virtual environment
 source .venv/bin/activate
 
-# 3. Upgrade pip and install dependencies
+# 2. Or initialize a new one with Python 3.11+
+python3.11 -m venv .venv
+source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
-
 ```
 
 ---
@@ -29,87 +27,147 @@ pip install -r requirements.txt
 
 ```text
 yfBackTester/
-├── .cache/                 # Local CSV cache of downloaded Yahoo Finance bars
-├── .venv/                  # Python 3.11 virtual environment
+├── cache/                             # Local CSV cache of downloaded Yahoo Finance daily bars
+│   └── earnings/                      # Cached historical company earnings calendar dates
+├── config.py                          # Centralized universes, paths, and default parameters
+├── data_loader.py                     # Historical OHLCV fetcher with disk cache & earnings blackout
+├── portfolio_engine.py                # Multi-position portfolio backtest simulator (T+1 settlement, ratcheting stops)
+├── portfolio_engine_swing.py          # Structural swing simulator with stop buffer & target tuning
+├── run.py                             # Unified multi-strategy CLI runner with trade ledger display
+├── run_vwap.py                        # Benchmark runner for 30-ticker VWAP + RS system
+├── run_vwap_swing.py                  # Benchmark runner for single-slot structural swing system
+├── market_scanner.py                  # Real-time scanner for today's high-probability setups
+├── requirements.txt                   # yfinance, pandas, numpy, tabulate
 ├── strategies/
 │   ├── __init__.py
-│   ├── base.py             # Abstract base class for strategy plugins
-│   └── ema_shelf.py        # 20 EMA / 50 SMA Pullback strategy
-├── config.py               # Global parameters and path configs
-├── data_loader.py          # OHLCV data fetcher with disk caching
-├── engine.py               # Bar-by-bar backtest simulation & performance metrics
-├── requirements.txt        # yfinance, pandas, numpy, tabulate
-└── run.py                  # CLI runner and report generator
-
+│   ├── base.py                        # Abstract base class for strategy plugins
+│   ├── ema_shelf.py                   # 20 EMA / 50 SMA Pullback Pure 2R strategy
+│   └── vwap_shelf.py                  # 20 EMA + Weekly Anchored VWAP + Relative Strength vs SPY
+├── late_entry_day_trade/              # Intraday 1-minute 9 EMA / VWAP crossover trading system
+│   ├── data_engine.py                 # Single-ticker 1m data loader with lagged daily SMAs
+│   ├── data_engine_portfolio.py       # Multi-ticker portfolio 1m data loader
+│   ├── backtest.py                    # Single-ticker intraday simulation engine
+│   └── backtest_portfolio.py          # Chronological multi-ticker portfolio intraday simulator
+└── charts/
+    └── download_chart.py              # CLI utility for downloading clean 2-year daily CSV charts
 ```
 
 ---
 
-## Core Strategy Logic (`20EMA_50SMA_Pullback_Pure2R`)
+## Supported Strategies
 
-The default strategy mirrors the `rhTrader` autonomous swing execution rules:
-
+### 1. Weekly VWAP + 20 EMA Pullback + RS (`strategies/vwap_shelf.py`)
 * **Trend Filter:** Price > 50-day SMA and 20-day EMA > 50-day SMA.
-* **Pullback / Coil:** Daily low penetrates or comes within 0.3% of the rising 20 EMA, and close finishes in the top 40% of the daily range (defended tail).
-* **Signal Geometry:**
-* **Entry:** Next bar's Open price.
-* **Initial Stop ($1R$ Risk):** Signal bar Low ($Risk = Entry - Stop$).
-* **Breakeven Milestone ($+1R$):** $Entry + 1R$. Ratchets stop loss to $Entry$ to eliminate downside risk.
-* **Take Profit ($+2R$ Fixed):** $Entry + 2R$. Closes the position completely. No trailing stop.
+* **Relative Strength Filter:** 20-day return must outperform `SPY` over the same window.
+* **Institutional Support:** Candle Close must hold above the current week's Anchored VWAP.
+* **Pullback / Coil:** Daily Low penetrates or comes within 0.3% of the rising 20 EMA.
+* **Bullish Defense:** Candle Close finishes in the top 40% of the daily range (`min_close_pct=0.60`, defending the rejection tail).
+* **Exit Rules:**
+  - Initial stop at signal bar Low ($1R$ Risk).
+  - Intraday $+1R$ ratchet: moves stop loss to Breakeven ($Entry$).
+  - Intraday $+2R$ fixed profit target hit.
+  - Stale exit: liquidated at market close if stagnant for 14 bars without achieving $+1R$.
+  - Earnings defense: closes before market close prior to an earnings release (with a 5-day pre-earnings entry blackout).
 
+### 2. Pure 20 EMA / 50 SMA Pullback (`strategies/ema_shelf.py`)
+* **Trend Filter:** Price > 50 SMA and 20 EMA > 50 SMA.
+* **Pullback:** Low tags within 0.3% of 20 EMA.
+* **Defense:** Close in the upper 40% of the daily candle range.
+* **Sizing & Exits:** Same geometry as VWAP system with $+1R$ breakeven ratchet and $+2R$ target.
 
-* **Execution Order of Operations:**
-1. Gap-down check at Open below stop floor.
-2. Intraday Stop Loss / Breakeven breach check at Low.
-3. Intraday $+1R$ Breakeven ratchet check at High.
-4. Intraday $+2R$ Profit Target hit check at High.
-
-
+### 3. "Fashionably Late" Intraday Momentum (`late_entry_day_trade/`)
+* **Execution Windows:** 10:00 AM – 10:45 AM (Morning flush recovery) and 10:46 AM – 1:30 PM (Midday continuation).
+* **Trigger:** Intraday 1-minute 9 EMA crosses strictly above intraday VWAP with positive EMA slope.
+* **Macro Context:** Intraday price is within 3% of the Daily 5-period or 10-period SMA (calculated using yesterday's close to eliminate lookahead bias).
+* **Target & Risk:** Measured move targeting $3R$ reward ($Unit = Entry - LOD$, $Stop = Entry - Unit / 3$).
+* **15-Minute Chop Bailout:** If price fails to advance at least 30% towards target within 15 minutes, exits at market close.
+* **Curated Elite Universe:** Optimized for institutional follow-through and orderly momentum (`ARM`, `HOOD`, `PLTR`, `AMZN`, `AAPL`, `GOOGL`), delivering a 70.8% win rate and 4.17 profit factor.
 
 ---
 
 ## CLI Usage
 
-Ensure your virtual environment is active before running commands:
-
+Ensure the virtual environment is active:
 ```bash
 source .venv/bin/activate
-
 ```
 
-### 1. Default Multi-Ticker Test
+### 1. Unified Multi-Strategy Runner (`run.py`)
 
-Runs the backtest across default index and sector ETFs (`SPY`, `QQQ`, `XLK`, `SMH`, `IWM`, `AAPL`, `MSFT`, `NVDA`) from January 1, 2023 to present:
-
+Run the default VWAP strategy across the curated 30-ticker universe:
 ```bash
 python run.py
-
 ```
 
-### 2. Custom Date Range & Specific Tickers
-
-Pass custom start dates and a targeted basket of symbols:
-
+Run the Pure EMA Pullback strategy on specific tickers with trade ledger output:
 ```bash
-python run.py --tickers SPY QQQ XLK DIA --start 2022-01-01
-
+python run.py --strategy ema --tickers SPY QQQ NVDA AAPL --start 2023-01-01 --show-trades
 ```
 
-### 3. Detailed Trade Ledger
-
-Add `--show-trades` to print the individual trade log (entry/exit dates, price fills, exit reason, and individual $R$-multiples) for each ticker:
-
+Run the 1-minute Intraday Day-Trading strategy from the local SQLite Data Vault:
 ```bash
-python run.py --tickers SPY --start 2023-01-01 --show-trades
+python run.py --strategy daytrade --show-trades
+```
 
+Sync the latest 1-minute historical bars into the local SQLite Data Vault:
+```bash
+python run.py --sync-intraday
+```
+
+View Data Vault database status and coverage:
+```bash
+python run.py --vault-stats
+```
+
+### 2. Standalone Swing Runners
+
+Run the 2-slot VWAP benchmark runner:
+```bash
+python run_vwap.py --slots 2 --stale 14
+```
+
+Run the 1-slot Structural Swing runner with configurable stop buffer and reward:
+```bash
+python run_vwap_swing.py --slots 1 --risk 2.0 --reward 2.0 --buffer 0.8
+```
+
+### 3. Intraday 1-Minute Data Vault (`data_vault.py`)
+
+The local Data Vault stores continuous, high-resolution 1-minute time series in `data/intraday_1m.db` (SQLite):
+```bash
+# Sync recent 7-day 1m bars for the day-trade universe (automatically deduplicated)
+python data_vault.py --sync
+
+# Check storage stats, date ranges, and bar counts
+python data_vault.py --stats
+```
+
+### 4. Real-Time Market Scanner (`market_scanner.py`)
+
+Scan 30 institutional leaders for active setups today (Trend 1.5R or Rubber Band Reversion) backed by historical win rate verification:
+```bash
+python market_scanner.py
+```
+
+### 5. Intraday Day Trade Portfolio Backtest
+
+Run the chronological multi-ticker portfolio simulation across momentum leaders:
+```bash
+python late_entry_day_trade/backtest_portfolio.py
 ```
 
 ---
 
 ## Metric Definitions
 
-* **Win Rate:** Percentage of trades closing at $> 0.0R$.
-* **Total Return ($R$):** Cumulative $R$-multiple earned ($+2.0R$ per win, $-1.0R$ per initial stop-out, $0.0R$ per breakeven scratch).
-* **Expectancy ($E$):** Average return per trade in units of risk ($R$). A positive expectancy (e.g., $+0.20R$) indicates long-term mathematical edge.
-* **Profit Factor:** Gross profits divided by gross losses. Values $> 1.50$ indicate robust strategy edge.
-* **Avg Bars:** Average number of trading days a position was held open from entry to target or stop.
+* **Win Rate:** Percentage of executed trades closing at $> 0.0R$.
+* **Profit Factor:** Gross profits divided by gross losses. Values $> 1.50$ indicate a robust statistical edge.
+* **Expectancy ($R$):** Average return per trade in units of risk.
+* **Max Drawdown:** Maximum peak-to-trough account equity contraction experienced during the simulation.
+* **Exit Reasons:**
+  - `TARGET_2R` / `TARGET_3R`: Intraday price reached target.
+  - `BREAKEVEN`: Position stopped out at initial entry price after reaching $+1R$.
+  - `STOP_LOSS`: Position hit initial risk stop.
+  - `STOP_GAP`: Overnight price opened below stop level; filled at Open.
+  - `STALE_EXIT`: Closed at market close due to exceeding maximum allowed holding days without hitting $+1R$.
+  - `EARNINGS_EXIT`: Closed defensively on the trading day before corporate earnings announcements.

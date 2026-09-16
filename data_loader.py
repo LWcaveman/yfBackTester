@@ -3,15 +3,16 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 
-CACHE_DIR = "cache"
-EARNINGS_CACHE_DIR = os.path.join(CACHE_DIR, "earnings")
-
-# ETFs never have single-company earnings risk
-ETF_SYMBOLS = {
-    "SPY", "QQQ", "IWM", "SMH", "XLV", "XLI", "XLE", "XLK",
-    "XLP", "XLU", "XLB", "XLY", "XLF", "DIA", "MDY", "SOXX",
-    "IGV", "XBI", "XHB", "XRT", "XOP", "KRE", "ITA"
-}
+try:
+    from config import CACHE_DIR, EARNINGS_CACHE_DIR, ETF_SYMBOLS
+except ImportError:
+    CACHE_DIR = "cache"
+    EARNINGS_CACHE_DIR = os.path.join(CACHE_DIR, "earnings")
+    ETF_SYMBOLS = {
+        "SPY", "QQQ", "IWM", "SMH", "XLV", "XLI", "XLE", "XLK",
+        "XLP", "XLU", "XLB", "XLY", "XLF", "DIA", "MDY", "SOXX",
+        "IGV", "XBI", "XHB", "XRT", "XOP", "KRE", "ITA"
+    }
 
 def _get_cached_price(symbol: str, start_date: str) -> pd.DataFrame:
     os.makedirs(CACHE_DIR, exist_ok=True)

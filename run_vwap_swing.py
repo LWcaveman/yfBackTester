@@ -4,15 +4,15 @@ from data_loader import get_historical_data
 from strategies.vwap_shelf import VWAPEMAShelfStrategy
 from portfolio_engine_swing import PortfolioBacktesterSwing
 
-EXPANDED_UNIVERSE = [
-    "SPY", "QQQ", "IWM", "SMH", "XLV", "XLI", "XLE",
-    "AAPL", "NVDA", "META", "AMZN", "GOOGL",
-    "AMAT", "LRCX", "AVGO", "ADI", "MU",
-    "LLY", "MRK", "UNH", "AMGN", "TMO",
-    "BLK", "GS", "V",
-    "CAT", "UNP", "PH",
-    "COST", "HD"
-]
+from config import (
+    EXPANDED_UNIVERSE,
+    DEFAULT_START_DATE,
+    DEFAULT_STARTING_CAPITAL,
+    DEFAULT_RISK_PCT,
+    DEFAULT_STALE_BARS,
+    DEFAULT_TARGET_R,
+    DEFAULT_STOP_BUFFER_PCT,
+)
 
 def main():
     parser = argparse.ArgumentParser(description="VWAP Structural Swing Simulation")

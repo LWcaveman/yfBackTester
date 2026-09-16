@@ -3,10 +3,11 @@ import numpy as np
 from strategies.base import BaseStrategy
 
 class EMAShelfStrategy(BaseStrategy):
-    def __init__(self, ema_period: int = 20, sma_period: int = 50):
+    def __init__(self, ema_period: int = 20, sma_period: int = 50, min_close_pct: float = 0.60):
         super().__init__(name="20EMA_50SMA_Pullback_Pure2R")
         self.ema_period = ema_period
         self.sma_period = sma_period
+        self.min_close_pct = min_close_pct
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         data = df.copy()
@@ -22,9 +23,9 @@ class EMAShelfStrategy(BaseStrategy):
         # 2. Pullback test: Candle low penetrates or tags within 0.3% of 20 EMA
         touches_ema = (data["low"] <= data["ema20"] * 1.003) & (data["close"] >= data["ema20"] * 0.990)
 
-        # 3. Bullish Defense: Close finishes in the top 50% of the daily range (rejection tail)
+        # 3. Bullish Defense: Close finishes in the top 40% of the daily range (>= 60th percentile)
         candle_range = data["high"] - data["low"]
-        strong_close = np.where(candle_range > 0, (data["close"] - data["low"]) / candle_range >= 0.40, False)
+        strong_close = np.where(candle_range > 0, (data["close"] - data["low"]) / candle_range >= self.min_close_pct, False)
 
         data["setup_valid"] = uptrend & touches_ema & strong_close
 

@@ -1,15 +1,26 @@
 import pandas as pd
-from datetime import time
-from data_engine_portfolio import get_strategy_data
+from datetime import datetime, time
+try:
+    from data_engine_portfolio import get_strategy_data
+except ImportError:
+    from late_entry_day_trade.data_engine_portfolio import get_strategy_data
 
 class FashionablyLatePortfolio:
-    def __init__(self, tickers, start_capital=1000.0, risk_pct=0.02):
+    def __init__(
+        self,
+        tickers,
+        start_capital=1000.0,
+        risk_pct=0.02,
+        max_trades_per_day: int = 1,
+        morning_cutoff: str = "10:45",
+        midday_max_unit_pct: float = 0.0075
+    ):
         self.tickers = tickers
         self.start_capital = start_capital
-        
-        # Money Management: Risk 2% of account equity per trade. 
-        # On a $1000 account, if your stop hits, you lose a maximum of $20.
         self.risk_pct = risk_pct 
+        self.max_trades_per_day = max_trades_per_day
+        self.morning_cutoff = datetime.strptime(morning_cutoff, "%H:%M").time() if isinstance(morning_cutoff, str) else morning_cutoff
+        self.midday_max_unit_pct = midday_max_unit_pct
         
         self.raw_signals = []
         self.executed_trades = []
@@ -28,7 +39,7 @@ class FashionablyLatePortfolio:
         df['Prev_VWAP'] = df['VWAP'].shift(1)
         
         in_trade = False
-        entry_price = stop_loss = target = 0.0
+        entry_price = stop_loss = target = unit = 0.0
         entry_time = None
         entry_idx = 0
         
@@ -42,12 +53,12 @@ class FashionablyLatePortfolio:
                 
                 # Pessimistic Backtesting: Assume stop loss is hit before target if both occur in the same minute
                 if row['Low'] <= stop_loss:
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, stop_loss, "STOP_LOSS")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, stop_loss, "STOP_LOSS", unit)
                     in_trade = False
                     continue
                     
                 if row['High'] >= target:
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, target, "TARGET_3R")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, target, "TARGET_3R", unit)
                     in_trade = False
                     continue
                     
@@ -55,13 +66,13 @@ class FashionablyLatePortfolio:
                 if mins_in_trade >= 15:
                     progress_thresh = entry_price + ((target - entry_price) * 0.3)
                     if row['Close'] < progress_thresh:
-                        self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, row['Close'], "CHOP_TIME_STOP")
+                        self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, row['Close'], "CHOP_TIME_STOP", unit)
                         in_trade = False
                         continue
                         
                 # End of Day Flush
                 if current_time >= time(15, 58):
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, row['Close'], "EOD_EXIT")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, row['Close'], "EOD_EXIT", unit)
                     in_trade = False
                 continue
                 
@@ -88,7 +99,8 @@ class FashionablyLatePortfolio:
                     entry_time = current_dt
                     entry_idx = i
 
-    def _record_signal(self, ticker, entry_dt, exit_dt, entry_price, stop_loss, exit_price, reason):
+    def _record_signal(self, ticker, entry_dt, exit_dt, entry_price, stop_loss, exit_price, reason, unit=0.0):
+        unit_pct = (unit / entry_price) if entry_price > 0 else 0.0
         self.raw_signals.append({
             'Ticker': ticker,
             'Entry Time': entry_dt,
@@ -96,7 +108,9 @@ class FashionablyLatePortfolio:
             'Entry Price': entry_price,
             'Stop Loss': stop_loss,
             'Exit Price': exit_price,
-            'Reason': reason
+            'Reason': reason,
+            'Unit': unit,
+            'Unit Pct': unit_pct
         })
 
     def run_portfolio_simulation(self):
@@ -106,12 +120,23 @@ class FashionablyLatePortfolio:
         equity = self.start_capital
         peak_equity = equity
         max_drawdown = 0.0
-        
-        # CHANGE 1: Initialize as None instead of pd.Timestamp.min
-        locked_until = None 
+        locked_until = None
+        trades_per_day = {}
         
         for sig in self.raw_signals:
-            # CHANGE 2: Check if locked_until is not None before comparing
+            sig_dt = sig['Entry Time']
+            sig_date = sig_dt.date() if hasattr(sig_dt, 'date') else sig_dt
+            sig_time = sig_dt.time() if hasattr(sig_dt, 'time') else sig_dt
+
+            # Enforce 1 Trade Per Day (Cash Account Limit)
+            if trades_per_day.get(sig_date, 0) >= self.max_trades_per_day:
+                continue
+
+            # Enforce Afternoon Tight Unit Filter
+            if sig_time > self.morning_cutoff:
+                if sig.get('Unit Pct', 0.0) > self.midday_max_unit_pct:
+                    continue
+
             if locked_until is not None and sig['Entry Time'] < locked_until:
                 continue
                 
@@ -142,6 +167,7 @@ class FashionablyLatePortfolio:
                 
             # Lock the capital until this trade completes
             locked_until = sig['Exit Time']
+            trades_per_day[sig_date] = trades_per_day.get(sig_date, 0) + 1
             
             self.executed_trades.append({
                 'Ticker': sig['Ticker'],
@@ -194,8 +220,13 @@ class FashionablyLatePortfolio:
         print("="*40 + "\n")
 
 if __name__ == "__main__":
-    # A wide universe ensures the bot constantly has momentum setups to scan 
-    tickers = ["TSLA", "NVDA", "PLTR", "HOOD", "AMD", "AAPL", "COIN", "MSTR", "META", "AMZN"]
+    import sys, os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    try:
+        from config import DAYTRADE_TICKERS as tickers
+    except ImportError:
+        # Curated Elite Day-Trading Universe
+        tickers = ["ARM", "HOOD", "PLTR", "AMZN", "AAPL", "GOOGL"]
     
     sim = FashionablyLatePortfolio(tickers, start_capital=1000.0, risk_pct=0.02)
     sim.generate_signals()

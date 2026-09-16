@@ -3,10 +3,11 @@ import numpy as np
 from strategies.base import BaseStrategy
 
 class VWAPEMAShelfStrategy(BaseStrategy):
-    def __init__(self, ema_period: int = 20, sma_period: int = 50):
+    def __init__(self, ema_period: int = 20, sma_period: int = 50, min_close_pct: float = 0.60):
         super().__init__(name="20EMA_WeeklyVWAP_RS_System")
         self.ema_period = ema_period
         self.sma_period = sma_period
+        self.min_close_pct = min_close_pct
 
     def generate_signals(self, df: pd.DataFrame, spy_df: pd.DataFrame = None) -> pd.DataFrame:
         data = df.copy()
@@ -55,9 +56,9 @@ class VWAPEMAShelfStrategy(BaseStrategy):
         # EMA Pullback Test
         touches_ema = (data["low"] <= data["ema20"] * 1.003) & (data["close"] >= data["ema20"] * 0.990)
 
-        # Bullish Rejection: Close in upper 40% of bar
+        # Bullish Rejection: Close in upper 40% of bar (>= 60th percentile)
         candle_range = data["high"] - data["low"]
-        strong_close = np.where(candle_range > 0, (data["close"] - data["low"]) / candle_range >= 0.40, False)
+        strong_close = np.where(candle_range > 0, (data["close"] - data["low"]) / candle_range >= self.min_close_pct, False)
 
         # Institutional Defense: Close must hold above Weekly VWAP
         above_wvwap = data["close"] >= data["weekly_vwap"]

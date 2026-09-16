@@ -1,6 +1,9 @@
 import pandas as pd
-from data_engine import get_strategy_data
 from datetime import time
+try:
+    from data_engine import get_strategy_data
+except ImportError:
+    from late_entry_day_trade.data_engine import get_strategy_data
 
 class FashionablyLateBacktester:
     def __init__(self, ticker):
@@ -125,8 +128,12 @@ class FashionablyLateBacktester:
 
 
 if __name__ == "__main__":
-    # Test on a few highly liquid momentum stocks
-    tickers_to_test = ["TSLA", "NVDA", "PLTR", "HOOD"]
+    import sys, os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    try:
+        from config import DAYTRADE_TICKERS as tickers_to_test
+    except ImportError:
+        tickers_to_test = ["ARM", "HOOD", "PLTR", "AMZN", "AAPL", "GOOGL"]
     
     for symbol in tickers_to_test:
         try:

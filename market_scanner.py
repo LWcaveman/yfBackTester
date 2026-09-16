@@ -4,13 +4,16 @@ import numpy as np
 import warnings
 warnings.filterwarnings('ignore')
 
-# Curated Universe: Mega-caps, High-Beta Tech, Broad Indices, and Sector Leaders
-TICKERS = [
-    "SPY", "QQQ", "DIA", "IWM", "SMH", "XLF", "XLE", "XLV", 
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", 
-    "AVGO", "NFLX", "AMD", "QCOM", "NOW", "PANW", "CRWD",
-    "COST", "WMT", "JPM", "V", "MA", "UNH", "LLY", "XOM"
-]
+try:
+    from config import SCANNER_TICKERS as TICKERS
+except ImportError:
+    # Curated Universe: Mega-caps, High-Beta Tech, Broad Indices, and Sector Leaders
+    TICKERS = [
+        "SPY", "QQQ", "DIA", "IWM", "SMH", "XLF", "XLE", "XLV", 
+        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", 
+        "AVGO", "NFLX", "AMD", "QCOM", "NOW", "PANW", "CRWD",
+        "COST", "WMT", "JPM", "V", "MA", "UNH", "LLY", "XOM"
+    ]
 
 def analyze_ticker(ticker):
     try:

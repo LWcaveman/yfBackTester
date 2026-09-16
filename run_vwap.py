@@ -4,23 +4,15 @@ from data_loader import get_historical_data
 from strategies.vwap_shelf import VWAPEMAShelfStrategy
 from portfolio_engine import PortfolioBacktester
 
-# The Exact 30-Ticker High-Profit Universe
-EXPANDED_UNIVERSE = [
-    # Core Index & Sector ETFs (Liquidity Foundation)
-    "SPY", "QQQ", "IWM", "SMH", "XLV", "XLI", "XLE",
-    # MegaCap Tech & Cloud Momentum
-    "AAPL", "NVDA", "META", "AMZN", "GOOGL",
-    # High-Performance Semiconductor Leaders (Removed QCOM)
-    "AMAT", "LRCX", "AVGO", "ADI", "MU",
-    # Healthcare & Biotech Trends
-    "LLY", "MRK", "UNH", "AMGN", "TMO",
-    # Financial Leaders (Kept V, GS, BLK; Removed AXP, MA, JPM)
-    "BLK", "GS", "V",
-    # Industrials & Defense (Kept CAT, UNP, PH; Removed ETN, GE)
-    "CAT", "UNP", "PH",
-    # Quality Retail & Consumer
-    "COST", "HD"
-]
+from config import (
+    EXPANDED_UNIVERSE,
+    DEFAULT_START_DATE,
+    DEFAULT_STARTING_CAPITAL,
+    DEFAULT_RISK_PCT,
+    DEFAULT_MAX_POSITIONS,
+    DEFAULT_STALE_BARS,
+    DEFAULT_MIN_RISK_PCT,
+)
 
 def main():
     parser = argparse.ArgumentParser(description="VWAP Simulation")
