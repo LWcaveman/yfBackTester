@@ -50,13 +50,26 @@ EXPANDED_UNIVERSE = [
 ETF_SYMBOLS = {
     "SPY", "QQQ", "IWM", "SMH", "XLV", "XLI", "XLE", "XLK",
     "XLP", "XLU", "XLB", "XLY", "XLF", "DIA", "MDY", "SOXX",
-    "IGV", "XBI", "XHB", "XRT", "XOP", "KRE", "ITA"
+    "IGV", "XBI", "XHB", "XRT", "XOP", "KRE", "ITA", "SH", "PSQ"
 }
 
 # Curated Elite Day-Trading Universe (Optimized for 9 EMA / VWAP 3R Setup)
 DAYTRADE_TICKERS = [
     "ARM", "HOOD", "PLTR", "AMZN", "AAPL", "GOOGL"
 ]
+
+# Benchmark & Index Anchors
+INDEX_TICKERS = [
+    "SPY", "QQQ"
+]
+
+# 1x Inverse Benchmark ETFs (for bear market regime intraday trading)
+INVERSE_TICKERS = [
+    "SH", "PSQ"
+]
+
+# Extended Universe for Multi-Year Vault (10 tickers)
+DAYTRADE_EXTENDED_UNIVERSE = DAYTRADE_TICKERS + INDEX_TICKERS + INVERSE_TICKERS
 
 # Day-Trading Edge Parameters (Small Cash Account Optimized)
 DEFAULT_DAYTRADE_MIN_CLOSE_PCT: float = 0.60

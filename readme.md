@@ -106,12 +106,11 @@ python run.py --strategy ema --tickers SPY QQQ NVDA AAPL --start 2023-01-01 --sh
 
 Run the 1-minute Intraday Day-Trading strategy from the local SQLite Data Vault:
 ```bash
+# Backtest across all data currently in the vault
 python run.py --strategy daytrade --show-trades
-```
 
-Sync the latest 1-minute historical bars into the local SQLite Data Vault:
-```bash
-python run.py --sync-intraday
+# Backtest across a specific lookback window (e.g. 250 trading days / 1 year)
+python run.py --strategy daytrade --days 250 --show-trades
 ```
 
 View Data Vault database status and coverage:
@@ -119,7 +118,27 @@ View Data Vault database status and coverage:
 python run.py --vault-stats
 ```
 
-### 2. Standalone Swing Runners
+### 2. Multi-Year Alpaca Data Vault (`alpaca_vault.py`)
+
+The local Data Vault stores continuous, high-resolution 1-minute time series from Alpaca Market Data API v2 (SIP feed with 100% consolidated market volume) in `data/intraday_1m.db` (SQLite):
+
+```bash
+# 1. Bulk sync 2 years of 1m bars for the 10-ticker universe (ARM, HOOD, PLTR, AMZN, AAPL, GOOGL, SPY, QQQ, SH, PSQ)
+python run.py --bulk-sync --years 2
+
+# 2. Add or sync any individual ticker for N years
+python run.py --add-ticker NVDA --years 2
+
+# 3. Check storage stats, date ranges, and bar counts
+python run.py --vault-stats
+
+# Direct alpaca_vault CLI
+python alpaca_vault.py --bulk-sync --years 2
+python alpaca_vault.py --add-ticker TSLA --years 2
+python alpaca_vault.py --stats
+```
+
+### 3. Standalone Swing Runners
 
 Run the 2-slot VWAP benchmark runner:
 ```bash

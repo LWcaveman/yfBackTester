@@ -12,6 +12,9 @@ from tabulate import tabulate
 from config import (
     EXPANDED_UNIVERSE,
     DAYTRADE_TICKERS,
+    DAYTRADE_EXTENDED_UNIVERSE,
+    INDEX_TICKERS,
+    INVERSE_TICKERS,
     DEFAULT_START_DATE,
     DEFAULT_STARTING_CAPITAL,
     DEFAULT_RISK_PCT,
@@ -23,6 +26,7 @@ from config import (
 )
 from data_loader import get_historical_data
 from data_vault import sync_watchlist, get_vault_stats
+from alpaca_vault import AlpacaDataVault
 from strategies.ema_shelf import EMAShelfStrategy
 from strategies.vwap_shelf import VWAPEMAShelfStrategy
 from portfolio_engine import PortfolioBacktester
@@ -116,6 +120,36 @@ def parse_args():
         help="Display summary statistics of the local 1-minute SQLite Data Vault",
     )
     parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Number of days to backtest (defaults to all available data in vault)",
+    )
+    parser.add_argument(
+        "--bulk-sync",
+        action="store_true",
+        help="Sync full 10-ticker universe (ARM, HOOD, PLTR, AMZN, AAPL, GOOGL, SPY, QQQ, SH, PSQ) via Alpaca SIP for N years",
+    )
+    parser.add_argument(
+        "--add-ticker",
+        type=str,
+        default=None,
+        help="Add/sync a single ticker into local SQLite Vault via Alpaca SIP for N years",
+    )
+    parser.add_argument(
+        "--years",
+        type=float,
+        default=2.0,
+        help="Historical lookback in years for Alpaca sync (default: 2.0)",
+    )
+    parser.add_argument(
+        "--feed",
+        type=str,
+        default="sip",
+        choices=["sip", "iex"],
+        help="Alpaca data feed type (default: sip)",
+    )
+    parser.add_argument(
         "--show-trades",
         action="store_true",
         help="Display individual executed trade ledger in terminal",
@@ -145,6 +179,7 @@ def run_intraday_backtest(args, tickers):
         min_close_pct=args.min_close_pct,
         min_vol_ratio=args.min_vol_ratio,
         ratchet_1_5r=not args.no_ratchet,
+        days=args.days,
     )
     sim.generate_signals()
     sim.run_portfolio_simulation()
@@ -240,27 +275,34 @@ def run_swing_backtest(args, tickers):
 def main():
     args = parse_args()
 
-    # Vault Management Commands
+    # Alpaca Data Vault Commands
+    if args.bulk_sync:
+        vault = AlpacaDataVault(feed=args.feed)
+        tickers = args.tickers if args.tickers else DAYTRADE_EXTENDED_UNIVERSE
+        vault.bulk_sync(tickers=tickers, years=args.years)
+        vault.print_stats()
+        return
+
+    if args.add_ticker:
+        vault = AlpacaDataVault(feed=args.feed)
+        vault.sync_ticker(args.add_ticker, years=args.years)
+        vault.print_stats()
+        return
+
+    # Legacy Vault Management Commands
     if args.sync_intraday:
         tickers = args.tickers if args.tickers else DAYTRADE_TICKERS
         sync_watchlist(tickers)
         return
 
     if args.vault_stats:
-        stats = get_vault_stats()
-        print("\n=======================================================")
-        print(" INTRADAY 1-MINUTE DATA VAULT STATUS")
-        print("=======================================================")
-        if stats.empty:
-            print("Vault is currently empty. Run with --sync-intraday to fetch data.")
-        else:
-            print(stats.to_string(index=False))
-        print("=======================================================\n")
+        vault = AlpacaDataVault(feed=args.feed)
+        vault.print_stats()
         return
 
     # Dispatch to appropriate backtest runner
     if args.strategy == "daytrade":
-        tickers = args.tickers if args.tickers else DAYTRADE_TICKERS
+        tickers = args.tickers if args.tickers else DAYTRADE_EXTENDED_UNIVERSE
         run_intraday_backtest(args, tickers)
     else:
         tickers = args.tickers if args.tickers else EXPANDED_UNIVERSE

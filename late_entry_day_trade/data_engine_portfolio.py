@@ -16,8 +16,8 @@ def get_strategy_data(ticker_symbol: str, days: int = None) -> pd.DataFrame:
     Fetches continuous 1-minute intraday data from the SQLite Data Vault
     and merges daily 5 and 10 SMAs with VWAP, 9 EMA, and LOD indicators.
     """
-    # 1. Fetch Daily Data for Daily SMAs
-    daily = yf.download(ticker_symbol, period="90d", interval="1d", progress=False)
+    # 1. Fetch Daily Data for Daily SMAs (3 years for multi-year backtesting)
+    daily = yf.download(ticker_symbol, period="3y", interval="1d", progress=False)
     if daily.empty:
         raise ValueError(f"No daily data for {ticker_symbol}.")
 

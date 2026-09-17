@@ -16,7 +16,8 @@ class FashionablyLatePortfolio:
         midday_max_unit_pct: float = 0.0075,
         min_close_pct: float = 0.60,
         min_vol_ratio: float = 0.80,
-        ratchet_1_5r: bool = True
+        ratchet_1_5r: bool = True,
+        days: int = None
     ):
         self.tickers = tickers
         self.start_capital = start_capital
@@ -27,6 +28,7 @@ class FashionablyLatePortfolio:
         self.min_close_pct = min_close_pct
         self.min_vol_ratio = min_vol_ratio
         self.ratchet_1_5r = ratchet_1_5r
+        self.days = days
         
         self.raw_signals = []
         self.executed_trades = []
@@ -35,7 +37,7 @@ class FashionablyLatePortfolio:
         print(f"Scanning {len(self.tickers)} tickers for historical setups...")
         for ticker in self.tickers:
             try:
-                df = get_strategy_data(ticker)
+                df = get_strategy_data(ticker, days=self.days)
                 self._scan_ticker(ticker, df)
             except Exception:
                 pass # Silently skip tickers with missing data
