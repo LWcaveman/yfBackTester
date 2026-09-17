@@ -29,6 +29,10 @@ from config import (
     DEFAULT_DAYTRADE_PARTIAL_SCALE_PCT,
     DEFAULT_DAYTRADE_RUNNER_R,
     DEFAULT_DAYTRADE_MORNING_CUTOFF,
+    DEFAULT_DAYTRADE_MAX_TRADES_PER_DAY,
+    DEFAULT_DAYTRADE_BUYING_POWER_MULT,
+    DEFAULT_DAYTRADE_INDEX_GATE,
+    DEFAULT_DAYTRADE_FRACTIONAL,
 )
 from data_loader import get_historical_data
 from data_vault import sync_watchlist, get_vault_stats
@@ -157,7 +161,8 @@ def parse_args():
     )
     parser.add_argument(
         "--index-gate",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DAYTRADE_INDEX_GATE,
         help="Enable Market Regime Index Gate (QQQ 50 EMA Regime + Intraday SPY/QQQ VWAP tide)",
     )
     parser.add_argument(
@@ -167,8 +172,21 @@ def parse_args():
     )
     parser.add_argument(
         "--fractional",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DAYTRADE_FRACTIONAL,
         help="Enable fractional share position sizing (matching live Robinhood execution)",
+    )
+    parser.add_argument(
+        "--max-trades",
+        type=int,
+        default=DEFAULT_DAYTRADE_MAX_TRADES_PER_DAY,
+        help=f"Maximum trades per day (default: {DEFAULT_DAYTRADE_MAX_TRADES_PER_DAY})",
+    )
+    parser.add_argument(
+        "--buying-power-mult",
+        type=float,
+        default=DEFAULT_DAYTRADE_BUYING_POWER_MULT,
+        help=f"Buying power multiplier (default: {DEFAULT_DAYTRADE_BUYING_POWER_MULT} for 1x pure cash)",
     )
     parser.add_argument(
         "--enable-chop-stop",
@@ -183,7 +201,7 @@ def parse_args():
     )
     parser.add_argument(
         "--enable-partial-scale",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE,
         help="Enable partial scale-out (bank 33% at +1.5R, move stop to breakeven, runner to 4.0R)",
     )
@@ -216,7 +234,7 @@ def run_intraday_backtest(args, tickers):
     dual_status = "ENABLED (Morning Momentum + Midday VWAP Reversion)" if args.enable_dual_engine else "DISABLED"
     scale_status = "ENABLED (Scale 33% @ 1.5R, Runner to 4.0R)" if args.enable_partial_scale else "DISABLED (Pure 3.0R Target)"
     print(f" Universe: {tickers}")
-    print(f" Risk: {args.risk}% | 1 Trade/Day Policy | Morning Cutoff: {args.morning_cutoff}")
+    print(f" Risk: {args.risk}% | Max Trades/Day: {args.max_trades} | Buying Power: {args.buying_power_mult}x | Morning Cutoff: {args.morning_cutoff}")
     print(f" Dual-Engine: {dual_status} | Partial Scale: {scale_status}")
     print(f" Chop Stop: {chop_status} | Index Gate: {gate_status} | RS Filter: {rs_status}")
     print("=" * 65)
@@ -225,7 +243,7 @@ def run_intraday_backtest(args, tickers):
         tickers=tickers,
         start_capital=args.capital,
         risk_pct=args.risk / 100.0,
-        max_trades_per_day=1,
+        max_trades_per_day=args.max_trades,
         morning_cutoff=args.morning_cutoff,
         midday_max_unit_pct=0.0075,
         min_close_pct=args.min_close_pct,
@@ -238,6 +256,7 @@ def run_intraday_backtest(args, tickers):
         enable_chop_stop=args.enable_chop_stop,
         enable_dual_engine=args.enable_dual_engine,
         enable_partial_scale=args.enable_partial_scale,
+        buying_power_mult=args.buying_power_mult,
     )
     sim.generate_signals()
     sim.run_portfolio_simulation()
@@ -360,7 +379,7 @@ def main():
 
     # Dispatch to appropriate backtest runner
     if args.strategy == "daytrade":
-        tickers = args.tickers if args.tickers else DAYTRADE_EXTENDED_UNIVERSE
+        tickers = args.tickers if args.tickers else DAYTRADE_TICKERS
         run_intraday_backtest(args, tickers)
     else:
         tickers = args.tickers if args.tickers else EXPANDED_UNIVERSE

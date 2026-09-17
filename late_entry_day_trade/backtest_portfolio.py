@@ -33,23 +33,24 @@ class FashionablyLatePortfolio:
         tickers,
         start_capital=1000.0,
         risk_pct=0.02,
-        max_trades_per_day: int = 1,
+        max_trades_per_day: int = 2,
         morning_cutoff: str = "10:45",
         midday_max_unit_pct: float = 0.0075,
         min_close_pct: float = 0.60,
         min_vol_ratio: float = 0.80,
         ratchet_1_5r: bool = True,
         days: int = None,
-        index_gate: bool = False,
+        index_gate: bool = True,
         require_rs: bool = False,
-        fractional: bool = False,
+        fractional: bool = True,
         enable_chop_stop: bool = False,
         enable_dual_engine: bool = False,
-        enable_partial_scale: bool = False,
+        enable_partial_scale: bool = True,
         partial_scale_r: float = 1.5,
         partial_scale_pct: float = 0.33,
         runner_r: float = 4.0,
-        midday_tickers: list = None
+        midday_tickers: list = None,
+        buying_power_mult: float = 1.0
     ):
         self.tickers = tickers
         self.start_capital = start_capital
@@ -71,6 +72,7 @@ class FashionablyLatePortfolio:
         self.partial_scale_pct = partial_scale_pct
         self.runner_r = runner_r
         self.midday_tickers = midday_tickers if midday_tickers is not None else MIDDAY_REVERSION_TICKERS
+        self.buying_power_mult = buying_power_mult
         
         self.raw_signals = []
         self.executed_trades = []
@@ -474,13 +476,14 @@ class FashionablyLatePortfolio:
             
             # Position Sizing Math
             risk_amount = equity * self.risk_pct
+            max_bp = equity * self.buying_power_mult
             if self.fractional:
                 shares = round(risk_amount / stop_dist, 4)
-                max_shares_cash = round(equity / sig['Entry Price'], 4)
+                max_shares_cash = round(max_bp / sig['Entry Price'], 4)
                 shares = min(shares, max_shares_cash)
             else:
                 shares = int(risk_amount / stop_dist)
-                max_shares_cash = int(equity / sig['Entry Price'])
+                max_shares_cash = int(max_bp / sig['Entry Price'])
                 shares = min(shares, max_shares_cash)
             
             if shares <= 0:

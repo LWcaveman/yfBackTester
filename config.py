@@ -53,9 +53,9 @@ ETF_SYMBOLS = {
     "IGV", "XBI", "XHB", "XRT", "XOP", "KRE", "ITA", "SH", "PSQ"
 }
 
-# Curated Elite Day-Trading Universe (Optimized for 9 EMA / VWAP 3R Setup)
+# Curated Elite Day-Trading Universe (Optimized for High Capital Efficiency in Small Cash Accounts)
 DAYTRADE_TICKERS = [
-    "CONL", "SOXL", "TQQQ", "PLTR", "RBLX", "AMZN", "AAPL", "ARM", "GOOGL"
+    "TSLL", "NVDL", "CONL", "TQQQ", "PLTR", "RBLX", "AAPL", "AMZN"
 ]
 
 # Benchmark & Index Anchors
@@ -76,15 +76,19 @@ DEFAULT_DAYTRADE_MIN_CLOSE_PCT: float = 0.60
 DEFAULT_DAYTRADE_MIN_VOL_RATIO: float = 0.80
 DEFAULT_DAYTRADE_RATCHET_1_5R: bool = True
 DEFAULT_DAYTRADE_ENABLE_CHOP_STOP: bool = False  # NO_CHOP_STOP policy verified by 2-yr backtest
+DEFAULT_DAYTRADE_MAX_TRADES_PER_DAY: int = 2
+DEFAULT_DAYTRADE_BUYING_POWER_MULT: float = 1.0  # 1.0 = 100% Pure Cash Account
+DEFAULT_DAYTRADE_INDEX_GATE: bool = True
+DEFAULT_DAYTRADE_FRACTIONAL: bool = True
 
-# Dual-Engine Day-Trading Parameters
+# Dual-Engine & Partial Scaling Parameters
 DEFAULT_DAYTRADE_ENABLE_DUAL_ENGINE: bool = False
-DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE: bool = False
+DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE: bool = True
 DEFAULT_DAYTRADE_PARTIAL_SCALE_R: float = 1.5
 DEFAULT_DAYTRADE_PARTIAL_SCALE_PCT: float = 0.33
 DEFAULT_DAYTRADE_RUNNER_R: float = 4.0
 DEFAULT_DAYTRADE_MORNING_CUTOFF: str = "10:45"
-MIDDAY_REVERSION_TICKERS = ["TQQQ", "CONL", "SOXL", "AAPL", "PLTR"]
+MIDDAY_REVERSION_TICKERS = ["CONL", "SOXL", "AAPL", "PLTR"]
 
 # Market Scanner Universe (market_scanner.py)
 SCANNER_TICKERS = [
