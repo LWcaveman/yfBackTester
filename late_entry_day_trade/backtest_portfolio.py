@@ -112,6 +112,7 @@ class FashionablyLatePortfolio:
         vol_smas = df['Vol_SMA10'].values
         vols = df['Volume'].values
         lods = df['LOD'].values
+        dates = df['Date'].values
         n = len(df)
         
         in_trade = False
@@ -119,6 +120,8 @@ class FashionablyLatePortfolio:
         partial_price = 0.0
         entry_price = stop_loss = target = unit = 0.0
         entry_time = None
+        entry_clock = None
+        entry_date = None
         entry_idx = 0
         
         for i in range(10, n):
@@ -148,7 +151,7 @@ class FashionablyLatePortfolio:
                     else:
                         exit_price = stop_loss
                         reason = "BREAKEVEN" if abs(stop_loss - entry_price) < 0.02 else "STOP_LOSS"
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, reason, unit, strategy="MORNING_MOMENTUM")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, reason, unit, strategy="MORNING_MOMENTUM", entry_date=entry_date, entry_clock=entry_clock)
                     in_trade = False
                     continue
                     
@@ -160,7 +163,7 @@ class FashionablyLatePortfolio:
                     else:
                         exit_price = target
                         reason = f"TARGET_{self.runner_r}R" if self.enable_partial_scale else "TARGET_3R"
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, reason, unit, strategy="MORNING_MOMENTUM")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, reason, unit, strategy="MORNING_MOMENTUM", entry_date=entry_date, entry_clock=entry_clock)
                     in_trade = False
                     continue
                     
@@ -169,14 +172,14 @@ class FashionablyLatePortfolio:
                     progress_thresh = entry_price + ((target - entry_price) * 0.3)
                     if closes[i] < progress_thresh:
                         exit_price = (partial_price * self.partial_scale_pct + closes[i] * (1.0 - self.partial_scale_pct)) if took_partial else closes[i]
-                        self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, "CHOP_TIME_STOP", unit, strategy="MORNING_MOMENTUM")
+                        self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, "CHOP_TIME_STOP", unit, strategy="MORNING_MOMENTUM", entry_date=entry_date, entry_clock=entry_clock)
                         in_trade = False
                         continue
                         
                 # End of Day Flush
                 if current_time >= time(15, 58):
                     exit_price = (partial_price * self.partial_scale_pct + closes[i] * (1.0 - self.partial_scale_pct)) if took_partial else closes[i]
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, "EOD_EXIT", unit, strategy="MORNING_MOMENTUM")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, "EOD_EXIT", unit, strategy="MORNING_MOMENTUM", entry_date=entry_date, entry_clock=entry_clock)
                     in_trade = False
                 continue
                 
@@ -216,6 +219,8 @@ class FashionablyLatePortfolio:
                     else:
                         target = entry_price + unit
                     entry_time = current_dt
+                    entry_clock = times[i]
+                    entry_date = dates[i]
                     entry_idx = i
 
     def _scan_midday_reversion(self, ticker, df):
@@ -226,6 +231,7 @@ class FashionablyLatePortfolio:
         closes = df['Close'].values
         opens = df['Open'].values
         times = df['Time'].values
+        dates = df['Date'].values
         dts = df['Datetime'].values
         vwaps = df['VWAP'].values
         lower_bands = df['VWAP_Lower_2SD'].values
@@ -238,6 +244,8 @@ class FashionablyLatePortfolio:
         in_trade = False
         entry_price = stop_loss = target = unit = 0.0
         entry_time = None
+        entry_clock = None
+        entry_date = None
         entry_idx = 0
         
         for i in range(15, n):
@@ -247,19 +255,19 @@ class FashionablyLatePortfolio:
             if in_trade:
                 # Stop Loss check
                 if lows[i] <= stop_loss:
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, stop_loss, "MIDDAY_STOP_LOSS", unit, strategy="MIDDAY_VWAP_REVERSION")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, stop_loss, "MIDDAY_STOP_LOSS", unit, strategy="MIDDAY_VWAP_REVERSION", entry_date=entry_date, entry_clock=entry_clock)
                     in_trade = False
                     continue
                     
                 # Target check: Central VWAP
                 if highs[i] >= vwaps[i]:
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, vwaps[i], "MIDDAY_TARGET_VWAP", unit, strategy="MIDDAY_VWAP_REVERSION")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, vwaps[i], "MIDDAY_TARGET_VWAP", unit, strategy="MIDDAY_VWAP_REVERSION", entry_date=entry_date, entry_clock=entry_clock)
                     in_trade = False
                     continue
                     
                 # End of Day Flush
                 if current_time >= time(15, 58):
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, closes[i], "MIDDAY_EOD", unit, strategy="MIDDAY_VWAP_REVERSION")
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, closes[i], "MIDDAY_EOD", unit, strategy="MIDDAY_VWAP_REVERSION", entry_date=entry_date, entry_clock=entry_clock)
                     in_trade = False
                 continue
                 
@@ -293,14 +301,18 @@ class FashionablyLatePortfolio:
                 unit = sd * 3.0
                 in_trade = True
                 entry_time = current_dt
+                entry_clock = times[i]
+                entry_date = dates[i]
                 entry_idx = i
 
-    def _record_signal(self, ticker, entry_dt, exit_dt, entry_price, stop_loss, exit_price, reason, unit=0.0, strategy="MORNING_MOMENTUM"):
+    def _record_signal(self, ticker, entry_dt, exit_dt, entry_price, stop_loss, exit_price, reason, unit=0.0, strategy="MORNING_MOMENTUM", entry_date=None, entry_clock=None):
         unit_pct = (unit / entry_price) if entry_price > 0 else 0.0
         self.raw_signals.append({
             'Ticker': ticker,
             'Entry Time': pd.to_datetime(entry_dt),
             'Exit Time': pd.to_datetime(exit_dt),
+            'Date': entry_date if entry_date is not None else pd.to_datetime(entry_dt).date(),
+            'Time': entry_clock if entry_clock is not None else pd.to_datetime(entry_dt).time(),
             'Entry Price': entry_price,
             'Stop Loss': stop_loss,
             'Initial Stop': entry_price - (unit / 3.0),
@@ -395,13 +407,16 @@ class FashionablyLatePortfolio:
         max_drawdown = 0.0
         locked_until = None
         trades_per_day = {}
+        # Sort raw signals chronologically across all tickers and engines
+        self.raw_signals.sort(key=lambda x: pd.to_datetime(x['Entry Time']))
         
         for sig in self.raw_signals:
             sig_dt = pd.to_datetime(sig['Entry Time'])
-            sig_date = sig_dt.date()
-            sig_time = sig_dt.time()
+            sig_date = sig.get('Date', sig_dt.date())
+            sig_time = sig.get('Time', sig_dt.time())
             ticker = sig['Ticker']
-            dt_key = str(sig_dt)[:19]
+            strategy = sig.get('Strategy', 'MORNING_MOMENTUM')
+            dt_key = str(sig['Entry Time'])[:19]
 
             # Enforce 1 Trade Per Day (Cash Account Limit)
             if trades_per_day.get(sig_date, 0) >= self.max_trades_per_day:
@@ -409,41 +424,46 @@ class FashionablyLatePortfolio:
 
             # Enforce Market Regime & Index Gate Logic
             regime = "BULL"
-            if self.index_gate:
-                if qqq_regime:
-                    is_bull = qqq_regime.get(sig_date, True)
-                    regime = "BULL" if is_bull else "BEAR"
-                    if not is_bull:
-                        # Bear / Correction Regime (QQQ <= 50 EMA):
-                        # Block high-beta growth stocks that drag during pullbacks
-                        if ticker in ['ARM', 'HOOD']:
-                            continue
-                    else:
-                        # Bull Expansion Regime (QQQ > 50 EMA):
-                        # Block inverse ETFs (don't short in a bull market)
-                        if ticker in ['PSQ', 'SH']:
-                            continue
-
-                # Intraday Index VWAP Tide Gate
-                if ticker in ['PSQ', 'SH']:
-                    # Inverse trades require QQQ dropping below VWAP intraday
-                    if qqq_vwap_map and not qqq_vwap_map.get(dt_key, True):
+            if self.index_gate and qqq_regime:
+                is_bull = qqq_regime.get(sig_date, True)
+                regime = "BULL" if is_bull else "BEAR"
+                if not is_bull:
+                    # Bear / Correction Regime (QQQ <= 50 EMA):
+                    # Block high-beta growth stocks that drag during pullbacks
+                    if ticker in ['ARM', 'HOOD', 'CONL', 'SOXL']:
                         continue
                 else:
-                    # Long trades require SPY lifting above VWAP intraday
-                    if spy_vwap_map and not spy_vwap_map.get(dt_key, True):
+                    # Bull Expansion Regime (QQQ > 50 EMA):
+                    # Block inverse ETFs (don't short in a bull market)
+                    if ticker in ['PSQ', 'SH']:
                         continue
 
-            # Enforce 20-Day Relative Strength (RS >= 0)
-            if self.require_rs and ticker not in ['PSQ', 'SH']:
-                ticker_rs = rs_map.get(ticker, {}).get(sig_date, 0.0)
-                if ticker_rs < 0.0:
-                    continue
+            # Engine-Specific Filters
+            if strategy == 'MORNING_MOMENTUM':
+                # Intraday Index VWAP Tide Gate
+                if self.index_gate:
+                    if ticker in ['PSQ', 'SH']:
+                        # Inverse trades require QQQ dropping below VWAP intraday
+                        if qqq_vwap_map and not qqq_vwap_map.get(dt_key, True):
+                            continue
+                    else:
+                        # Long trades require SPY lifting above VWAP intraday
+                        if spy_vwap_map and not spy_vwap_map.get(dt_key, True):
+                            continue
 
-            # Enforce Afternoon Tight Unit Filter
-            if sig_time > self.morning_cutoff:
-                if sig.get('Unit Pct', 0.0) > self.midday_max_unit_pct:
-                    continue
+                # Enforce 20-Day Relative Strength (RS >= 0)
+                if self.require_rs and ticker not in ['PSQ', 'SH']:
+                    ticker_rs = rs_map.get(ticker, {}).get(sig_date, 0.0)
+                    if ticker_rs < 0.0:
+                        continue
+
+                # Enforce Afternoon Tight Unit Filter (for late morning momentum entries)
+                if sig_time > self.morning_cutoff:
+                    if sig.get('Unit Pct', 0.0) > self.midday_max_unit_pct:
+                        continue
+            elif strategy == 'MIDDAY_VWAP_REVERSION':
+                # Midday VWAP Reversion is mean-reversion, already filtered by ADX < 25 and -2 SD touch!
+                pass
 
             if locked_until is not None and sig['Entry Time'] < locked_until:
                 continue
