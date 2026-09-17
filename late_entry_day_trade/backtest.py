@@ -5,101 +5,129 @@ try:
 except ImportError:
     from late_entry_day_trade.data_engine import get_strategy_data
 
+
 class FashionablyLateBacktester:
-    def __init__(self, ticker):
+    def __init__(
+        self,
+        ticker: str,
+        min_close_pct: float = 0.60,
+        min_vol_ratio: float = 0.80,
+        ratchet_1_5r: bool = True,
+    ):
         self.ticker = ticker
         self.df = get_strategy_data(ticker)
+        self.min_close_pct = min_close_pct
+        self.min_vol_ratio = min_vol_ratio
+        self.ratchet_1_5r = ratchet_1_5r
         self.trades = []
         self.in_trade = False
-        
+
         # State tracking
         self.entry_price = 0.0
         self.stop_loss = 0.0
         self.target = 0.0
+        self.unit = 0.0
         self.entry_time = None
         self.entry_index = 0
         self.current_date = None
-        
+
     def run(self):
         # Shift values to detect the exact minute the crossover happens
-        self.df['Prev_EMA_9'] = self.df['EMA_9'].shift(1)
-        self.df['Prev_VWAP'] = self.df['VWAP'].shift(1)
-        
-        for i in range(1, len(self.df)):
+        self.df["Prev_EMA_9"] = self.df["EMA_9"].shift(1)
+        self.df["Prev_VWAP"] = self.df["VWAP"].shift(1)
+        self.df["Vol_SMA10"] = self.df["Volume"].rolling(10).mean()
+
+        for i in range(10, len(self.df)):
             row = self.df.iloc[i]
-            
+
             # --- 1. MANAGE ACTIVE TRADE ---
             if self.in_trade:
                 minutes_in_trade = i - self.entry_index
-                
+
+                # +1.5R Breakeven Ratchet
+                if self.ratchet_1_5r and self.stop_loss < self.entry_price:
+                    halfway = self.entry_price + (self.unit * 0.5)
+                    if row["High"] >= halfway:
+                        self.stop_loss = self.entry_price
+
                 # Check Target (Win)
-                if row['High'] >= self.target:
-                    self.close_trade(row['Time'], self.target, "Target Hit")
+                if row["High"] >= self.target:
+                    self.close_trade(row["Time"], self.target, "Target Hit")
                     continue
-                    
-                # Check Stop Loss (Loss)
-                if row['Low'] <= self.stop_loss:
-                    self.close_trade(row['Time'], self.stop_loss, "Stop Loss Hit")
+
+                # Check Stop Loss / Breakeven
+                if row["Low"] <= self.stop_loss:
+                    reason = "Breakeven Scratched" if abs(self.stop_loss - self.entry_price) < 0.02 else "Stop Loss Hit"
+                    self.close_trade(row["Time"], self.stop_loss, reason)
                     continue
-                    
+
                 # The 15-Minute "Chop" Time-Stop Bailout
                 if minutes_in_trade >= 15:
-                    # If price hasn't moved at least 30% of the way to target, bail.
                     progress_threshold = self.entry_price + ((self.target - self.entry_price) * 0.3)
-                    if row['Close'] < progress_threshold:
-                        self.close_trade(row['Time'], row['Close'], "Time Stop (Chop/No Momentum)")
+                    if row["Close"] < progress_threshold:
+                        self.close_trade(row["Time"], row["Close"], "Time Stop (Chop/No Momentum)")
                         continue
-                        
+
                 # Ensure we close out completely at the end of the market day
-                if row['Time'] >= time(15, 58):
-                    self.close_trade(row['Time'], row['Close'], "End of Day Close")
+                if row["Time"] >= time(15, 58):
+                    self.close_trade(row["Time"], row["Close"], "End of Day Close")
                 continue
-                
+
             # --- 2. SCAN FOR NEW ENTRY ---
-            current_time = row['Time']
-            
-            # Spiro's strict execution windows
+            current_time = row["Time"]
+
+            # Execution windows
             valid_morning = time(10, 0) <= current_time <= time(10, 45)
             valid_midday = time(10, 46) <= current_time <= time(13, 30)
             if not (valid_morning or valid_midday):
                 continue
-                
+
             # Trigger: 9 EMA crosses strictly ABOVE VWAP
-            cross_up = (row['EMA_9'] > row['VWAP']) and (row['Prev_EMA_9'] <= row['Prev_VWAP'])
-            
+            cross_up = (row["EMA_9"] > row["VWAP"]) and (row["Prev_EMA_9"] <= row["Prev_VWAP"])
+
             if cross_up:
                 # Nuance: Reject flat momentum (EMA slope must be positive)
-                if row['EMA_9'] <= row['Prev_EMA_9']:
-                    continue 
-                    
-                # Nuance: Daily Context (Price must be pulling back to the Daily 5 or 10 SMA)
-                # We define "pulling back" as being within 3% of the SMA line
-                near_5 = abs(row['Close'] - row['SMA_5']) / row['SMA_5'] < 0.03
-                near_10 = abs(row['Close'] - row['SMA_10']) / row['SMA_10'] < 0.03
+                if row["EMA_9"] <= row["Prev_EMA_9"]:
+                    continue
+
+                # Daily Context (Price within 3% of Daily 5 or 10 SMA)
+                near_5 = abs(row["Close"] - row["SMA_5"]) / row["SMA_5"] < 0.03
+                near_10 = abs(row["Close"] - row["SMA_10"]) / row["SMA_10"] < 0.03
                 if not (near_5 or near_10):
                     continue
-                
-                # Setup the Measured Move bounds
-                lod = row['LOD']
-                entry_price = row['Close'] # Simulation enters exactly as the 1m crossing candle closes
-                
+
+                # Bullish Close Percentile Filter (rejection of topping wicks)
+                c_range = row["High"] - row["Low"]
+                cpct = (row["Close"] - row["Low"]) / c_range if c_range > 0 else 0.5
+                if cpct < self.min_close_pct:
+                    continue
+
+                # Volume Participation Filter
+                vol_sma = row["Vol_SMA10"]
+                if vol_sma > 0 and (row["Volume"] / vol_sma) < self.min_vol_ratio:
+                    continue
+
+                lod = row["LOD"]
+                entry_price = row["Close"]
+
                 if entry_price <= lod:
-                    continue # Failsafe against bad data
-                    
+                    continue
+
                 unit = entry_price - lod
-                
+
                 self.in_trade = True
+                self.unit = unit
                 self.entry_price = entry_price
                 self.target = entry_price + unit
                 self.stop_loss = entry_price - (unit / 3.0)
                 self.entry_time = current_time
                 self.entry_index = i
-                self.current_date = row['Date']
+                self.current_date = row["Date"]
 
     def close_trade(self, exit_time, exit_price, reason):
         pnl = exit_price - self.entry_price
         pnl_pct = pnl / self.entry_price
-        
+
         self.trades.append({
             "Date": self.current_date,
             "Entry Time": self.entry_time,
@@ -107,7 +135,7 @@ class FashionablyLateBacktester:
             "Entry Price": round(self.entry_price, 2),
             "Exit Price": round(exit_price, 2),
             "PnL %": round(pnl_pct * 100, 2),
-            "Reason": reason
+            "Reason": reason,
         })
         self.in_trade = False
 
@@ -115,11 +143,11 @@ class FashionablyLateBacktester:
         if not self.trades:
             print(f"\nNo trades triggered for {self.ticker} in the last 7 days.")
             return
-            
+
         trades_df = pd.DataFrame(self.trades)
-        wins = len(trades_df[trades_df['PnL %'] > 0])
+        wins = len(trades_df[trades_df["PnL %"] > 0])
         win_rate = (wins / len(trades_df)) * 100
-        
+
         print(f"\n=== BACKTEST RESULTS: {self.ticker} (Last 7 Days) ===")
         print(f"Total Trades: {len(trades_df)}")
         print(f"Win Rate: {win_rate:.1f}%")
@@ -128,16 +156,31 @@ class FashionablyLateBacktester:
 
 
 if __name__ == "__main__":
-    import sys, os
+    import sys
+    import os
+
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     try:
-        from config import DAYTRADE_TICKERS as tickers_to_test
+        from config import (
+            DAYTRADE_TICKERS as tickers_to_test,
+            DEFAULT_DAYTRADE_MIN_CLOSE_PCT,
+            DEFAULT_DAYTRADE_MIN_VOL_RATIO,
+            DEFAULT_DAYTRADE_RATCHET_1_5R,
+        )
     except ImportError:
         tickers_to_test = ["ARM", "HOOD", "PLTR", "AMZN", "AAPL", "GOOGL"]
-    
+        DEFAULT_DAYTRADE_MIN_CLOSE_PCT = 0.60
+        DEFAULT_DAYTRADE_MIN_VOL_RATIO = 0.80
+        DEFAULT_DAYTRADE_RATCHET_1_5R = True
+
     for symbol in tickers_to_test:
         try:
-            bot = FashionablyLateBacktester(symbol)
+            bot = FashionablyLateBacktester(
+                symbol,
+                min_close_pct=DEFAULT_DAYTRADE_MIN_CLOSE_PCT,
+                min_vol_ratio=DEFAULT_DAYTRADE_MIN_VOL_RATIO,
+                ratchet_1_5r=DEFAULT_DAYTRADE_RATCHET_1_5R,
+            )
             bot.run()
             bot.print_results()
         except Exception as e:

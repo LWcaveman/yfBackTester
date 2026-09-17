@@ -18,8 +18,8 @@ def get_strategy_data(ticker_symbol: str, days: int = None) -> pd.DataFrame:
     """
     print(f"Loading Vault data for {ticker_symbol}...")
 
-    # 1. Fetch Daily Data for Daily SMAs
-    daily = yf.download(ticker_symbol, period="90d", interval="1d", progress=False)
+    # 1. Fetch Daily Data for Daily SMAs (3 years for multi-year backtesting)
+    daily = yf.download(ticker_symbol, period="3y", interval="1d", progress=False)
     if daily.empty:
         raise ValueError(f"Failed to fetch daily data for {ticker_symbol}.")
 

@@ -53,6 +53,8 @@ htmlcov/
 .tox/
 .nox/
 
+.env
+
 # IDEs and Editors
 .vscode/
 .idea/

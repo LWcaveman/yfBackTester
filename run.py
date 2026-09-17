@@ -12,6 +12,9 @@ from tabulate import tabulate
 from config import (
     EXPANDED_UNIVERSE,
     DAYTRADE_TICKERS,
+    DAYTRADE_EXTENDED_UNIVERSE,
+    INDEX_TICKERS,
+    INVERSE_TICKERS,
     DEFAULT_START_DATE,
     DEFAULT_STARTING_CAPITAL,
     DEFAULT_RISK_PCT,
@@ -20,9 +23,20 @@ from config import (
     DEFAULT_MIN_RISK_PCT,
     DEFAULT_STOP_BUFFER_PCT,
     DEFAULT_TARGET_R,
+    DEFAULT_DAYTRADE_ENABLE_DUAL_ENGINE,
+    DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE,
+    DEFAULT_DAYTRADE_PARTIAL_SCALE_R,
+    DEFAULT_DAYTRADE_PARTIAL_SCALE_PCT,
+    DEFAULT_DAYTRADE_RUNNER_R,
+    DEFAULT_DAYTRADE_MORNING_CUTOFF,
+    DEFAULT_DAYTRADE_MAX_TRADES_PER_DAY,
+    DEFAULT_DAYTRADE_BUYING_POWER_MULT,
+    DEFAULT_DAYTRADE_INDEX_GATE,
+    DEFAULT_DAYTRADE_FRACTIONAL,
 )
 from data_loader import get_historical_data
 from data_vault import sync_watchlist, get_vault_stats
+from alpaca_vault import AlpacaDataVault
 from strategies.ema_shelf import EMAShelfStrategy
 from strategies.vwap_shelf import VWAPEMAShelfStrategy
 from portfolio_engine import PortfolioBacktester
@@ -92,7 +106,18 @@ def parse_args():
         "--min-close-pct",
         type=float,
         default=0.60,
-        help="Minimum candle close percentile (e.g., 0.60 for upper 40%% of daily range)",
+        help="Minimum candle close percentile (default: 0.60 for upper 40%% of candle range)",
+    )
+    parser.add_argument(
+        "--min-vol-ratio",
+        type=float,
+        default=0.80,
+        help="Minimum volume relative to 10-bar SMA on 1m cross (default: 0.80)",
+    )
+    parser.add_argument(
+        "--no-ratchet",
+        action="store_true",
+        help="Disable +1.5R breakeven ratchet defense",
     )
     parser.add_argument(
         "--sync-intraday",
@@ -103,6 +128,88 @@ def parse_args():
         "--vault-stats",
         action="store_true",
         help="Display summary statistics of the local 1-minute SQLite Data Vault",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Number of days to backtest (defaults to all available data in vault)",
+    )
+    parser.add_argument(
+        "--bulk-sync",
+        action="store_true",
+        help="Sync full 10-ticker universe (ARM, HOOD, PLTR, AMZN, AAPL, GOOGL, SPY, QQQ, SH, PSQ) via Alpaca SIP for N years",
+    )
+    parser.add_argument(
+        "--add-ticker",
+        type=str,
+        default=None,
+        help="Add/sync a single ticker into local SQLite Vault via Alpaca SIP for N years",
+    )
+    parser.add_argument(
+        "--years",
+        type=float,
+        default=2.0,
+        help="Historical lookback in years for Alpaca sync (default: 2.0)",
+    )
+    parser.add_argument(
+        "--feed",
+        type=str,
+        default="sip",
+        choices=["sip", "iex"],
+        help="Alpaca data feed type (default: sip)",
+    )
+    parser.add_argument(
+        "--index-gate",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DAYTRADE_INDEX_GATE,
+        help="Enable Market Regime Index Gate (QQQ 50 EMA Regime + Intraday SPY/QQQ VWAP tide)",
+    )
+    parser.add_argument(
+        "--require-rs",
+        action="store_true",
+        help="Require 20-day Relative Strength >= 0 vs SPY for long positions",
+    )
+    parser.add_argument(
+        "--fractional",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DAYTRADE_FRACTIONAL,
+        help="Enable fractional share position sizing (matching live Robinhood execution)",
+    )
+    parser.add_argument(
+        "--max-trades",
+        type=int,
+        default=DEFAULT_DAYTRADE_MAX_TRADES_PER_DAY,
+        help=f"Maximum trades per day (default: {DEFAULT_DAYTRADE_MAX_TRADES_PER_DAY})",
+    )
+    parser.add_argument(
+        "--buying-power-mult",
+        type=float,
+        default=DEFAULT_DAYTRADE_BUYING_POWER_MULT,
+        help=f"Buying power multiplier (default: {DEFAULT_DAYTRADE_BUYING_POWER_MULT} for 1x pure cash)",
+    )
+    parser.add_argument(
+        "--enable-chop-stop",
+        action="store_true",
+        help="Enable 15-minute chop time-stop (default: False, NO_CHOP_STOP policy)",
+    )
+    parser.add_argument(
+        "--enable-dual-engine",
+        action="store_true",
+        default=DEFAULT_DAYTRADE_ENABLE_DUAL_ENGINE,
+        help="Enable Dual-Engine mode (Engine 1: Morning Momentum + Engine 2: Midday VWAP Reversion)",
+    )
+    parser.add_argument(
+        "--enable-partial-scale",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE,
+        help="Enable partial scale-out (bank 33% at +1.5R, move stop to breakeven, runner to 4.0R)",
+    )
+    parser.add_argument(
+        "--morning-cutoff",
+        type=str,
+        default=DEFAULT_DAYTRADE_MORNING_CUTOFF,
+        help=f"Cutoff time for morning momentum entries (default: {DEFAULT_DAYTRADE_MORNING_CUTOFF})",
     )
     parser.add_argument(
         "--show-trades",
@@ -121,16 +228,35 @@ def parse_args():
 def run_intraday_backtest(args, tickers):
     print("\n" + "=" * 65)
     print(" EXECUTING 1-MINUTE INTRADAY SIMULATION (Data Vault)")
-    print(f" Universe: {tickers} | Risk: {args.risk}%")
+    gate_status = "ENABLED (QQQ 50 EMA + Intraday VWAP)" if args.index_gate else "DISABLED"
+    rs_status = "ENABLED (20d RS >= 0)" if args.require_rs else "DISABLED"
+    chop_status = "ENABLED (15m Time Stop)" if args.enable_chop_stop else "DISABLED (NO_CHOP_STOP Policy)"
+    dual_status = "ENABLED (Morning Momentum + Midday VWAP Reversion)" if args.enable_dual_engine else "DISABLED"
+    scale_status = "ENABLED (Scale 33% @ 1.5R, Runner to 4.0R)" if args.enable_partial_scale else "DISABLED (Pure 3.0R Target)"
+    print(f" Universe: {tickers}")
+    print(f" Risk: {args.risk}% | Max Trades/Day: {args.max_trades} | Buying Power: {args.buying_power_mult}x | Morning Cutoff: {args.morning_cutoff}")
+    print(f" Dual-Engine: {dual_status} | Partial Scale: {scale_status}")
+    print(f" Chop Stop: {chop_status} | Index Gate: {gate_status} | RS Filter: {rs_status}")
     print("=" * 65)
 
     sim = FashionablyLatePortfolio(
         tickers=tickers,
         start_capital=args.capital,
         risk_pct=args.risk / 100.0,
-        max_trades_per_day=1,
-        morning_cutoff="10:45",
+        max_trades_per_day=args.max_trades,
+        morning_cutoff=args.morning_cutoff,
         midday_max_unit_pct=0.0075,
+        min_close_pct=args.min_close_pct,
+        min_vol_ratio=args.min_vol_ratio,
+        ratchet_1_5r=not args.no_ratchet,
+        days=args.days,
+        index_gate=args.index_gate,
+        require_rs=args.require_rs,
+        fractional=args.fractional,
+        enable_chop_stop=args.enable_chop_stop,
+        enable_dual_engine=args.enable_dual_engine,
+        enable_partial_scale=args.enable_partial_scale,
+        buying_power_mult=args.buying_power_mult,
     )
     sim.generate_signals()
     sim.run_portfolio_simulation()
@@ -226,22 +352,29 @@ def run_swing_backtest(args, tickers):
 def main():
     args = parse_args()
 
-    # Vault Management Commands
+    # Alpaca Data Vault Commands
+    if args.bulk_sync:
+        vault = AlpacaDataVault(feed=args.feed)
+        tickers = args.tickers if args.tickers else DAYTRADE_EXTENDED_UNIVERSE
+        vault.bulk_sync(tickers=tickers, years=args.years)
+        vault.print_stats()
+        return
+
+    if args.add_ticker:
+        vault = AlpacaDataVault(feed=args.feed)
+        vault.sync_ticker(args.add_ticker, years=args.years)
+        vault.print_stats()
+        return
+
+    # Legacy Vault Management Commands
     if args.sync_intraday:
         tickers = args.tickers if args.tickers else DAYTRADE_TICKERS
         sync_watchlist(tickers)
         return
 
     if args.vault_stats:
-        stats = get_vault_stats()
-        print("\n=======================================================")
-        print(" INTRADAY 1-MINUTE DATA VAULT STATUS")
-        print("=======================================================")
-        if stats.empty:
-            print("Vault is currently empty. Run with --sync-intraday to fetch data.")
-        else:
-            print(stats.to_string(index=False))
-        print("=======================================================\n")
+        vault = AlpacaDataVault(feed=args.feed)
+        vault.print_stats()
         return
 
     # Dispatch to appropriate backtest runner
