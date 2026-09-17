@@ -152,7 +152,12 @@ def parse_args():
     parser.add_argument(
         "--index-gate",
         action="store_true",
-        help="Enable Market Regime Index Gate (QQQ > 50 EMA allows ARM/HOOD; QQQ <= 50 EMA blocks them and enables PSQ/SH)",
+        help="Enable Market Regime Index Gate (QQQ 50 EMA Regime + Intraday SPY/QQQ VWAP tide)",
+    )
+    parser.add_argument(
+        "--require-rs",
+        action="store_true",
+        help="Require 20-day Relative Strength >= 0 vs SPY for long positions",
     )
     parser.add_argument(
         "--fractional",
@@ -176,8 +181,9 @@ def parse_args():
 def run_intraday_backtest(args, tickers):
     print("\n" + "=" * 65)
     print(" EXECUTING 1-MINUTE INTRADAY SIMULATION (Data Vault)")
-    gate_status = "ENABLED (QQQ 50 EMA)" if args.index_gate else "DISABLED"
-    print(f" Universe: {tickers} | Risk: {args.risk}% | 1 Trade/Day Policy | Index Gate: {gate_status}")
+    gate_status = "ENABLED (QQQ 50 EMA + Intraday VWAP)" if args.index_gate else "DISABLED"
+    rs_status = "ENABLED (20d RS >= 0)" if args.require_rs else "DISABLED"
+    print(f" Universe: {tickers} | Risk: {args.risk}% | 1 Trade/Day Policy | Index Gate: {gate_status} | RS Filter: {rs_status}")
     print("=" * 65)
 
     sim = FashionablyLatePortfolio(
@@ -192,6 +198,7 @@ def run_intraday_backtest(args, tickers):
         ratchet_1_5r=not args.no_ratchet,
         days=args.days,
         index_gate=args.index_gate,
+        require_rs=args.require_rs,
         fractional=args.fractional,
     )
     sim.generate_signals()

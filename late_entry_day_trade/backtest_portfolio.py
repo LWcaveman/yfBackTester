@@ -1,5 +1,10 @@
+import os
+import sys
 import pandas as pd
 from datetime import datetime, time
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 try:
     from data_engine_portfolio import get_strategy_data
 except ImportError:
@@ -19,6 +24,7 @@ class FashionablyLatePortfolio:
         ratchet_1_5r: bool = True,
         days: int = None,
         index_gate: bool = False,
+        require_rs: bool = False,
         fractional: bool = False
     ):
         self.tickers = tickers
@@ -32,6 +38,7 @@ class FashionablyLatePortfolio:
         self.ratchet_1_5r = ratchet_1_5r
         self.days = days
         self.index_gate = index_gate
+        self.require_rs = require_rs
         self.fractional = fractional
         
         self.raw_signals = []
@@ -149,10 +156,13 @@ class FashionablyLatePortfolio:
         # Sort all theoretical setups chronologically to mimic live market execution
         self.raw_signals.sort(key=lambda x: x['Entry Time'])
         
-        # Load QQQ daily indicators if Index Gate is enabled
+        # 1. Load Index Gate Data (QQQ Daily 50 EMA + SPY/QQQ Intraday 1m VWAP)
         qqq_regime = {}
+        spy_vwap_map = {}
+        qqq_vwap_map = {}
+        
         if self.index_gate:
-            print("Applying Index Gate (QQQ Daily 50 EMA Regime Filter)...")
+            print("Applying Index Gate (QQQ Daily 50 EMA Regime + Intraday SPY/QQQ VWAP)...")
             try:
                 import yfinance as yf
                 qqq_df = yf.download("QQQ", period="3y", interval="1d", progress=False)
@@ -162,7 +172,64 @@ class FashionablyLatePortfolio:
                 qqq_df["Above_50EMA"] = qqq_df["Close"].shift(1) > qqq_df["EMA_50"].shift(1)
                 qqq_regime = dict(zip(pd.to_datetime(qqq_df.index).date, qqq_df["Above_50EMA"]))
             except Exception as e:
-                print(f"Warning: Could not fetch QQQ regime data ({e}), continuing without gate.")
+                print(f"Warning: Could not fetch QQQ daily regime data ({e})")
+
+            try:
+                import sqlite3
+                db_path = os.path.join(ROOT_DIR, "data", "intraday_1m.db")
+                con = sqlite3.connect(db_path)
+                bench_df = pd.read_sql("""
+                    SELECT ticker, datetime, open, high, low, close, volume 
+                    FROM bars_1m 
+                    WHERE ticker IN ('SPY', 'QQQ')
+                    ORDER BY datetime ASC
+                """, con)
+                con.close()
+                bench_df['Date'] = pd.to_datetime(bench_df['datetime']).dt.date
+                bench_df['Typical_Price'] = (bench_df['high'] + bench_df['low'] + bench_df['close']) / 3.0
+                bench_df['Vol_x_TP'] = bench_df['Typical_Price'] * bench_df['volume']
+
+                spy_df = bench_df[bench_df['ticker'] == 'SPY'].copy()
+                spy_vol = spy_df.groupby('Date')['volume'].cumsum()
+                spy_tp = spy_df.groupby('Date')['Vol_x_TP'].cumsum()
+                spy_df['SPY_VWAP'] = spy_tp / spy_vol
+                spy_df['SPY_Above_VWAP'] = spy_df['close'] >= spy_df['SPY_VWAP']
+                spy_vwap_map = dict(zip(spy_df['datetime'], spy_df['SPY_Above_VWAP']))
+
+                qqq_df = bench_df[bench_df['ticker'] == 'QQQ'].copy()
+                qqq_vol = qqq_df.groupby('Date')['volume'].cumsum()
+                qqq_tp = qqq_df.groupby('Date')['Vol_x_TP'].cumsum()
+                qqq_df['QQQ_VWAP'] = qqq_tp / qqq_vol
+                qqq_df['QQQ_Below_VWAP'] = qqq_df['close'] < qqq_df['QQQ_VWAP']
+                qqq_vwap_map = dict(zip(qqq_df['datetime'], qqq_df['QQQ_Below_VWAP']))
+                print(f"Loaded intraday VWAP tide for {len(spy_vwap_map)} SPY bars and {len(qqq_vwap_map)} QQQ bars.")
+            except Exception as e:
+                print(f"Warning: Could not load index intraday VWAP from vault ({e})")
+
+        # 2. Load 20-Day Relative Strength Data if enabled
+        rs_map = {}
+        if self.require_rs:
+            print("Applying Relative Strength Filter (20-day return >= SPY)...")
+            try:
+                import yfinance as yf
+                spy_d = yf.download("SPY", period="3y", interval="1d", progress=False)
+                if isinstance(spy_d.columns, pd.MultiIndex):
+                    spy_d.columns = spy_d.columns.get_level_values(0)
+                spy_ret = spy_d["Close"].pct_change(20).shift(1)
+                spy_ret.index = pd.to_datetime(spy_ret.index).date
+
+                for t in self.tickers:
+                    if t in ['SPY', 'QQQ', 'PSQ', 'SH']:
+                        continue
+                    t_d = yf.download(t, period="3y", interval="1d", progress=False)
+                    if isinstance(t_d.columns, pd.MultiIndex):
+                        t_d.columns = t_d.columns.get_level_values(0)
+                    t_ret = t_d["Close"].pct_change(20).shift(1)
+                    t_ret.index = pd.to_datetime(t_ret.index).date
+                    merged_rs = (t_ret - spy_ret).dropna()
+                    rs_map[t] = dict(merged_rs)
+            except Exception as e:
+                print(f"Warning: Could not compute relative strength ({e})")
 
         equity = self.start_capital
         peak_equity = equity
@@ -174,24 +241,45 @@ class FashionablyLatePortfolio:
             sig_dt = sig['Entry Time']
             sig_date = sig_dt.date() if hasattr(sig_dt, 'date') else sig_dt
             sig_time = sig_dt.time() if hasattr(sig_dt, 'time') else sig_dt
+            ticker = sig['Ticker']
+            dt_key = str(sig_dt)[:19]
 
             # Enforce 1 Trade Per Day (Cash Account Limit)
             if trades_per_day.get(sig_date, 0) >= self.max_trades_per_day:
                 continue
 
-            # Enforce Index Gate Regime Logic
-            if self.index_gate and qqq_regime:
-                is_bull = qqq_regime.get(sig_date, True)
-                if not is_bull:
-                    # Bear / Correction Regime (QQQ <= 50 EMA):
-                    # Block high-beta growth stocks that drag during pullbacks
-                    if sig['Ticker'] in ['ARM', 'HOOD']:
+            # Enforce Market Regime & Index Gate Logic
+            regime = "BULL"
+            if self.index_gate:
+                if qqq_regime:
+                    is_bull = qqq_regime.get(sig_date, True)
+                    regime = "BULL" if is_bull else "BEAR"
+                    if not is_bull:
+                        # Bear / Correction Regime (QQQ <= 50 EMA):
+                        # Block high-beta growth stocks that drag during pullbacks
+                        if ticker in ['ARM', 'HOOD']:
+                            continue
+                    else:
+                        # Bull Expansion Regime (QQQ > 50 EMA):
+                        # Block inverse ETFs (don't short in a bull market)
+                        if ticker in ['PSQ', 'SH']:
+                            continue
+
+                # Intraday Index VWAP Tide Gate
+                if ticker in ['PSQ', 'SH']:
+                    # Inverse trades require QQQ dropping below VWAP intraday
+                    if qqq_vwap_map and not qqq_vwap_map.get(dt_key, True):
                         continue
                 else:
-                    # Bull Expansion Regime (QQQ > 50 EMA):
-                    # Block inverse ETFs (don't short in a bull market)
-                    if sig['Ticker'] in ['PSQ', 'SH']:
+                    # Long trades require SPY lifting above VWAP intraday
+                    if spy_vwap_map and not spy_vwap_map.get(dt_key, True):
                         continue
+
+            # Enforce 20-Day Relative Strength (RS >= 0)
+            if self.require_rs and ticker not in ['PSQ', 'SH']:
+                ticker_rs = rs_map.get(ticker, {}).get(sig_date, 0.0)
+                if ticker_rs < 0.0:
+                    continue
 
             # Enforce Afternoon Tight Unit Filter
             if sig_time > self.morning_cutoff:
@@ -235,7 +323,7 @@ class FashionablyLatePortfolio:
             trades_per_day[sig_date] = trades_per_day.get(sig_date, 0) + 1
             
             self.executed_trades.append({
-                'Ticker': sig['Ticker'],
+                'Ticker': ticker,
                 'Entry Time': sig['Entry Time'],
                 'Exit Time': sig['Exit Time'],
                 'Shares': shares,
@@ -243,6 +331,7 @@ class FashionablyLatePortfolio:
                 'Exit Price': round(sig['Exit Price'], 2),
                 'Net PnL': round(gross_pnl, 2),
                 'Reason': sig['Reason'],
+                'Regime': regime,
                 'Equity': round(equity, 2)
             })
             
@@ -276,6 +365,24 @@ class FashionablyLatePortfolio:
         print(f"Profit Factor:     {profit_factor}")
         print(f"Max Drawdown:      -{max_dd * 100:.2f}%")
         
+        if 'Regime' in df.columns:
+            print("\n--- PERFORMANCE BY REGIME ---")
+            for reg, grp in df.groupby('Regime'):
+                r_wins = grp[grp['Net PnL'] > 0]['Net PnL'].sum()
+                r_loss = abs(grp[grp['Net PnL'] < 0]['Net PnL'].sum())
+                r_pf = round(r_wins / r_loss, 2) if r_loss > 0 else float('inf')
+                r_wr = (len(grp[grp['Net PnL'] > 0]) / len(grp)) * 100
+                print(f" {reg:4s} Regime: {len(grp):3d} Trades | Net: ${grp['Net PnL'].sum():+7.2f} | Win Rate: {r_wr:4.1f}% | Profit Factor: {r_pf:4.2f}")
+
+        print("\n--- PERFORMANCE BY TICKER ---")
+        for t, grp in df.groupby('Ticker'):
+            t_wins = grp[grp['Net PnL'] > 0]['Net PnL'].sum()
+            t_loss = abs(grp[grp['Net PnL'] < 0]['Net PnL'].sum())
+            t_pf = round(t_wins / t_loss, 2) if t_loss > 0 else float('inf')
+            t_wr = (len(grp[grp['Net PnL'] > 0]) / len(grp)) * 100
+            t_3r = (grp['Reason'] == 'TARGET_3R').sum()
+            print(f" {t:5s}: {len(grp):2d} Trades | Net: ${grp['Net PnL'].sum():+6.2f} | Win Rate: {t_wr:4.1f}% | PF: {t_pf:4.2f} | 3R Targets: {t_3r:2d}")
+
         print("\n--- EXIT REASONS ---")
         print(df['Reason'].value_counts().to_string())
         
