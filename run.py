@@ -23,6 +23,12 @@ from config import (
     DEFAULT_MIN_RISK_PCT,
     DEFAULT_STOP_BUFFER_PCT,
     DEFAULT_TARGET_R,
+    DEFAULT_DAYTRADE_ENABLE_DUAL_ENGINE,
+    DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE,
+    DEFAULT_DAYTRADE_PARTIAL_SCALE_R,
+    DEFAULT_DAYTRADE_PARTIAL_SCALE_PCT,
+    DEFAULT_DAYTRADE_RUNNER_R,
+    DEFAULT_DAYTRADE_MORNING_CUTOFF,
 )
 from data_loader import get_historical_data
 from data_vault import sync_watchlist, get_vault_stats
@@ -170,6 +176,24 @@ def parse_args():
         help="Enable 15-minute chop time-stop (default: False, NO_CHOP_STOP policy)",
     )
     parser.add_argument(
+        "--enable-dual-engine",
+        action="store_true",
+        default=DEFAULT_DAYTRADE_ENABLE_DUAL_ENGINE,
+        help="Enable Dual-Engine mode (Engine 1: Morning Momentum + Engine 2: Midday VWAP Reversion)",
+    )
+    parser.add_argument(
+        "--enable-partial-scale",
+        action="store_true",
+        default=DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE,
+        help="Enable partial scale-out (bank 33% at +1.5R, move stop to breakeven, runner to 4.0R)",
+    )
+    parser.add_argument(
+        "--morning-cutoff",
+        type=str,
+        default=DEFAULT_DAYTRADE_MORNING_CUTOFF,
+        help=f"Cutoff time for morning momentum entries (default: {DEFAULT_DAYTRADE_MORNING_CUTOFF})",
+    )
+    parser.add_argument(
         "--show-trades",
         action="store_true",
         help="Display individual executed trade ledger in terminal",
@@ -189,7 +213,12 @@ def run_intraday_backtest(args, tickers):
     gate_status = "ENABLED (QQQ 50 EMA + Intraday VWAP)" if args.index_gate else "DISABLED"
     rs_status = "ENABLED (20d RS >= 0)" if args.require_rs else "DISABLED"
     chop_status = "ENABLED (15m Time Stop)" if args.enable_chop_stop else "DISABLED (NO_CHOP_STOP Policy)"
-    print(f" Universe: {tickers} | Risk: {args.risk}% | 1 Trade/Day Policy | Chop Stop: {chop_status} | Index Gate: {gate_status} | RS Filter: {rs_status}")
+    dual_status = "ENABLED (Morning Momentum + Midday VWAP Reversion)" if args.enable_dual_engine else "DISABLED"
+    scale_status = "ENABLED (Scale 33% @ 1.5R, Runner to 4.0R)" if args.enable_partial_scale else "DISABLED (Pure 3.0R Target)"
+    print(f" Universe: {tickers}")
+    print(f" Risk: {args.risk}% | 1 Trade/Day Policy | Morning Cutoff: {args.morning_cutoff}")
+    print(f" Dual-Engine: {dual_status} | Partial Scale: {scale_status}")
+    print(f" Chop Stop: {chop_status} | Index Gate: {gate_status} | RS Filter: {rs_status}")
     print("=" * 65)
 
     sim = FashionablyLatePortfolio(
@@ -197,7 +226,7 @@ def run_intraday_backtest(args, tickers):
         start_capital=args.capital,
         risk_pct=args.risk / 100.0,
         max_trades_per_day=1,
-        morning_cutoff="10:45",
+        morning_cutoff=args.morning_cutoff,
         midday_max_unit_pct=0.0075,
         min_close_pct=args.min_close_pct,
         min_vol_ratio=args.min_vol_ratio,
@@ -207,6 +236,8 @@ def run_intraday_backtest(args, tickers):
         require_rs=args.require_rs,
         fractional=args.fractional,
         enable_chop_stop=args.enable_chop_stop,
+        enable_dual_engine=args.enable_dual_engine,
+        enable_partial_scale=args.enable_partial_scale,
     )
     sim.generate_signals()
     sim.run_portfolio_simulation()

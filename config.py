@@ -77,6 +77,15 @@ DEFAULT_DAYTRADE_MIN_VOL_RATIO: float = 0.80
 DEFAULT_DAYTRADE_RATCHET_1_5R: bool = True
 DEFAULT_DAYTRADE_ENABLE_CHOP_STOP: bool = False  # NO_CHOP_STOP policy verified by 2-yr backtest
 
+# Dual-Engine Day-Trading Parameters
+DEFAULT_DAYTRADE_ENABLE_DUAL_ENGINE: bool = False
+DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE: bool = False
+DEFAULT_DAYTRADE_PARTIAL_SCALE_R: float = 1.5
+DEFAULT_DAYTRADE_PARTIAL_SCALE_PCT: float = 0.33
+DEFAULT_DAYTRADE_RUNNER_R: float = 4.0
+DEFAULT_DAYTRADE_MORNING_CUTOFF: str = "10:45"
+MIDDAY_REVERSION_TICKERS = ["TQQQ", "CONL", "SOXL", "AAPL", "PLTR"]
+
 # Market Scanner Universe (market_scanner.py)
 SCANNER_TICKERS = [
     "SPY", "QQQ", "DIA", "IWM", "SMH", "XLF", "XLE", "XLV",
@@ -84,3 +93,4 @@ SCANNER_TICKERS = [
     "AVGO", "NFLX", "AMD", "QCOM", "NOW", "PANW", "CRWD",
     "COST", "WMT", "JPM", "V", "MA", "UNH", "LLY", "XOM"
 ]
+

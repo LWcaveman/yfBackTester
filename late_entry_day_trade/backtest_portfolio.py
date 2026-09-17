@@ -10,6 +10,23 @@ try:
 except ImportError:
     from late_entry_day_trade.data_engine_portfolio import get_strategy_data
 
+try:
+    from config import (
+        DEFAULT_DAYTRADE_ENABLE_DUAL_ENGINE,
+        DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE,
+        DEFAULT_DAYTRADE_PARTIAL_SCALE_R,
+        DEFAULT_DAYTRADE_PARTIAL_SCALE_PCT,
+        DEFAULT_DAYTRADE_RUNNER_R,
+        MIDDAY_REVERSION_TICKERS,
+    )
+except ImportError:
+    DEFAULT_DAYTRADE_ENABLE_DUAL_ENGINE = False
+    DEFAULT_DAYTRADE_ENABLE_PARTIAL_SCALE = False
+    DEFAULT_DAYTRADE_PARTIAL_SCALE_R = 1.5
+    DEFAULT_DAYTRADE_PARTIAL_SCALE_PCT = 0.33
+    DEFAULT_DAYTRADE_RUNNER_R = 4.0
+    MIDDAY_REVERSION_TICKERS = ["TQQQ", "CONL", "SOXL", "AAPL", "PLTR"]
+
 class FashionablyLatePortfolio:
     def __init__(
         self,
@@ -26,7 +43,13 @@ class FashionablyLatePortfolio:
         index_gate: bool = False,
         require_rs: bool = False,
         fractional: bool = False,
-        enable_chop_stop: bool = False
+        enable_chop_stop: bool = False,
+        enable_dual_engine: bool = False,
+        enable_partial_scale: bool = False,
+        partial_scale_r: float = 1.5,
+        partial_scale_pct: float = 0.33,
+        runner_r: float = 4.0,
+        midday_tickers: list = None
     ):
         self.tickers = tickers
         self.start_capital = start_capital
@@ -42,12 +65,18 @@ class FashionablyLatePortfolio:
         self.require_rs = require_rs
         self.fractional = fractional
         self.enable_chop_stop = enable_chop_stop
+        self.enable_dual_engine = enable_dual_engine
+        self.enable_partial_scale = enable_partial_scale
+        self.partial_scale_r = partial_scale_r
+        self.partial_scale_pct = partial_scale_pct
+        self.runner_r = runner_r
+        self.midday_tickers = midday_tickers if midday_tickers is not None else MIDDAY_REVERSION_TICKERS
         
         self.raw_signals = []
         self.executed_trades = []
         
     def generate_signals(self):
-        print(f"Scanning {len(self.tickers)} tickers for historical setups...")
+        print(f"Scanning {len(self.tickers)} tickers for historical morning momentum setups (Engine 1)...")
         for ticker in self.tickers:
             try:
                 df = get_strategy_data(ticker, days=self.days)
@@ -55,103 +84,231 @@ class FashionablyLatePortfolio:
             except Exception:
                 pass # Silently skip tickers with missing data
                 
+        if self.enable_dual_engine:
+            print(f"Scanning {len(self.midday_tickers)} tickers for Midday VWAP 2-SD Reversion setups (Engine 2)...")
+            for ticker in self.midday_tickers:
+                try:
+                    df = get_strategy_data(ticker, days=self.days)
+                    self._scan_midday_reversion(ticker, df)
+                except Exception:
+                    pass
+                
     def _scan_ticker(self, ticker, df):
         df['Prev_EMA_9'] = df['EMA_9'].shift(1)
         df['Prev_VWAP'] = df['VWAP'].shift(1)
         df['Vol_SMA10'] = df['Volume'].rolling(10).mean()
         
+        highs = df['High'].values
+        lows = df['Low'].values
+        closes = df['Close'].values
+        times = df['Time'].values
+        dts = df['Datetime'].values
+        ema9s = df['EMA_9'].values
+        p_ema9s = df['Prev_EMA_9'].values
+        vwaps = df['VWAP'].values
+        p_vwaps = df['Prev_VWAP'].values
+        sma5s = df['SMA_5'].values
+        sma10s = df['SMA_10'].values
+        vol_smas = df['Vol_SMA10'].values
+        vols = df['Volume'].values
+        lods = df['LOD'].values
+        n = len(df)
+        
         in_trade = False
+        took_partial = False
+        partial_price = 0.0
         entry_price = stop_loss = target = unit = 0.0
         entry_time = None
         entry_idx = 0
         
-        for i in range(10, len(df)):
-            row = df.iloc[i]
-            current_time = row['Time']
-            current_dt = row['Datetime']
+        for i in range(10, n):
+            current_time = times[i]
+            current_dt = dts[i]
             
             if in_trade:
                 mins_in_trade = i - entry_idx
                 
-                # +1.5R Breakeven Ratchet (Protects small account gains)
-                if self.ratchet_1_5r and stop_loss < entry_price:
+                # Check Partial Scaling or Breakeven Ratchet
+                if self.enable_partial_scale:
+                    partial_tgt = entry_price + (unit / 3.0) * self.partial_scale_r
+                    if not took_partial and highs[i] >= partial_tgt:
+                        took_partial = True
+                        partial_price = partial_tgt
+                        stop_loss = entry_price  # Lock in partial and ratchet stop to Breakeven
+                elif self.ratchet_1_5r and stop_loss < entry_price:
                     half_target = entry_price + (unit * 0.5)  # +1.5R in 3:1 geometry
-                    if row['High'] >= half_target:
+                    if highs[i] >= half_target:
                         stop_loss = entry_price  # Ratchet stop to Breakeven
                 
                 # Stop Loss check
-                if row['Low'] <= stop_loss:
-                    reason = "BREAKEVEN" if abs(stop_loss - entry_price) < 0.02 else "STOP_LOSS"
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, stop_loss, reason, unit)
+                if lows[i] <= stop_loss:
+                    if took_partial:
+                        exit_price = (partial_price * self.partial_scale_pct) + (stop_loss * (1.0 - self.partial_scale_pct))
+                        reason = f"PARTIAL_{self.partial_scale_r}R_AND_BE"
+                    else:
+                        exit_price = stop_loss
+                        reason = "BREAKEVEN" if abs(stop_loss - entry_price) < 0.02 else "STOP_LOSS"
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, reason, unit, strategy="MORNING_MOMENTUM")
                     in_trade = False
                     continue
                     
-                if row['High'] >= target:
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, target, "TARGET_3R", unit)
+                # Target check
+                if highs[i] >= target:
+                    if took_partial:
+                        exit_price = (partial_price * self.partial_scale_pct) + (target * (1.0 - self.partial_scale_pct))
+                        reason = f"PARTIAL_AND_RUNNER_{self.runner_r}R"
+                    else:
+                        exit_price = target
+                        reason = f"TARGET_{self.runner_r}R" if self.enable_partial_scale else "TARGET_3R"
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, reason, unit, strategy="MORNING_MOMENTUM")
                     in_trade = False
                     continue
                     
                 # 15-Minute Chop Time-Stop (disabled by default under NO_CHOP_STOP policy)
                 if self.enable_chop_stop and mins_in_trade >= 15:
                     progress_thresh = entry_price + ((target - entry_price) * 0.3)
-                    if row['Close'] < progress_thresh:
-                        self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, row['Close'], "CHOP_TIME_STOP", unit)
+                    if closes[i] < progress_thresh:
+                        exit_price = (partial_price * self.partial_scale_pct + closes[i] * (1.0 - self.partial_scale_pct)) if took_partial else closes[i]
+                        self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, "CHOP_TIME_STOP", unit, strategy="MORNING_MOMENTUM")
                         in_trade = False
                         continue
                         
                 # End of Day Flush
                 if current_time >= time(15, 58):
-                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, row['Close'], "EOD_EXIT", unit)
+                    exit_price = (partial_price * self.partial_scale_pct + closes[i] * (1.0 - self.partial_scale_pct)) if took_partial else closes[i]
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, exit_price, "EOD_EXIT", unit, strategy="MORNING_MOMENTUM")
                     in_trade = False
                 continue
                 
-            # Scan for Entry Parameters
-            valid_time = (time(10, 0) <= current_time <= time(10, 45)) or (time(10, 46) <= current_time <= time(13, 30))
+            # Scan for Entry Parameters (Morning Window: 10:00 AM to morning_cutoff)
+            valid_time = (time(10, 0) <= current_time <= self.morning_cutoff)
             if not valid_time: continue
             
-            cross_up = (row['EMA_9'] > row['VWAP']) and (row['Prev_EMA_9'] <= row['Prev_VWAP'])
+            cross_up = (ema9s[i] > vwaps[i]) and (p_ema9s[i] <= p_vwaps[i])
             
-            if cross_up and (row['EMA_9'] > row['Prev_EMA_9']):
-                near_5 = abs(row['Close'] - row['SMA_5']) / row['SMA_5'] < 0.03
-                near_10 = abs(row['Close'] - row['SMA_10']) / row['SMA_10'] < 0.03
+            if cross_up and (ema9s[i] > p_ema9s[i]):
+                near_5 = abs(closes[i] - sma5s[i]) / sma5s[i] < 0.03
+                near_10 = abs(closes[i] - sma10s[i]) / sma10s[i] < 0.03
                 
                 if near_5 or near_10:
                     # 1. Bullish Close Filter (Must close in upper 40% of candle range)
-                    c_range = row['High'] - row['Low']
-                    cpct = (row['Close'] - row['Low']) / c_range if c_range > 0 else 0.5
+                    c_range = highs[i] - lows[i]
+                    cpct = (closes[i] - lows[i]) / c_range if c_range > 0 else 0.5
                     if cpct < self.min_close_pct:
                         continue
 
                     # 2. Volume Participation Filter (>= min_vol_ratio x 10-bar SMA)
-                    vol_sma = row['Vol_SMA10']
-                    if vol_sma > 0 and (row['Volume'] / vol_sma) < self.min_vol_ratio:
+                    vol_sma = vol_smas[i]
+                    if vol_sma > 0 and (vols[i] / vol_sma) < self.min_vol_ratio:
                         continue
 
-                    lod = row['LOD']
-                    entry_price = row['Close']
+                    lod = lods[i]
+                    entry_price = closes[i]
                     if entry_price <= lod: continue # Data anomaly failsafe
                     
                     unit = entry_price - lod
                     in_trade = True
-                    entry_price = entry_price
+                    took_partial = False
+                    partial_price = 0.0
                     stop_loss = entry_price - (unit / 3.0)
-                    target = entry_price + unit
+                    if self.enable_partial_scale:
+                        target = entry_price + (unit / 3.0) * self.runner_r
+                    else:
+                        target = entry_price + unit
                     entry_time = current_dt
                     entry_idx = i
 
-    def _record_signal(self, ticker, entry_dt, exit_dt, entry_price, stop_loss, exit_price, reason, unit=0.0):
+    def _scan_midday_reversion(self, ticker, df):
+        """Engine 2: Midday VWAP 2-SD Mean Reversion (11:30 AM - 1:30 PM)."""
+        df['Vol_SMA10'] = df['Volume'].rolling(10).mean()
+        highs = df['High'].values
+        lows = df['Low'].values
+        closes = df['Close'].values
+        opens = df['Open'].values
+        times = df['Time'].values
+        dts = df['Datetime'].values
+        vwaps = df['VWAP'].values
+        lower_bands = df['VWAP_Lower_2SD'].values
+        adxs = df['ADX_5m'].values
+        atrs = df['ATR_1m'].values
+        vols = df['Volume'].values
+        vol_smas = df['Vol_SMA10'].values
+        n = len(df)
+        
+        in_trade = False
+        entry_price = stop_loss = target = unit = 0.0
+        entry_time = None
+        entry_idx = 0
+        
+        for i in range(15, n):
+            current_time = times[i]
+            current_dt = dts[i]
+            
+            if in_trade:
+                # Stop Loss check
+                if lows[i] <= stop_loss:
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, stop_loss, "MIDDAY_STOP_LOSS", unit, strategy="MIDDAY_VWAP_REVERSION")
+                    in_trade = False
+                    continue
+                    
+                # Target check: Central VWAP
+                if highs[i] >= vwaps[i]:
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, vwaps[i], "MIDDAY_TARGET_VWAP", unit, strategy="MIDDAY_VWAP_REVERSION")
+                    in_trade = False
+                    continue
+                    
+                # End of Day Flush
+                if current_time >= time(15, 58):
+                    self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, closes[i], "MIDDAY_EOD", unit, strategy="MIDDAY_VWAP_REVERSION")
+                    in_trade = False
+                continue
+                
+            # Entry Window: 11:30 AM to 1:30 PM
+            if not (time(11, 30) <= current_time <= time(13, 30)):
+                continue
+                
+            # ADX < 25 Filter (Rangebound / Non-trending requirement)
+            if adxs[i] > 25.0:
+                continue
+                
+            # Setup: Price extended below Lower 2-SD Band
+            if not (lows[i] <= lower_bands[i] or lows[i-1] <= lower_bands[i-1]):
+                continue
+                
+            # Reversal Trigger: Hammer or Green Engulfing with volume
+            rng = highs[i] - lows[i]
+            if rng <= 0: continue
+            is_hammer = (min(opens[i], closes[i]) - lows[i]) / rng >= 0.40 and closes[i] > opens[i]
+            is_green_engulf = closes[i] > opens[i] and closes[i] > highs[i-1]
+            vol_ok = vols[i] >= vol_smas[i] * 0.75
+            
+            if (is_hammer or is_green_engulf) and vol_ok:
+                entry_price = closes[i]
+                atr = atrs[i]
+                stop_loss = lows[i] - (1.5 * atr)
+                sd = entry_price - stop_loss
+                if sd <= 0 or sd / entry_price < 0.001: continue
+                
+                # Unit definition for sizing compatibility (unit = 3 * stop_dist)
+                unit = sd * 3.0
+                in_trade = True
+                entry_time = current_dt
+                entry_idx = i
+
+    def _record_signal(self, ticker, entry_dt, exit_dt, entry_price, stop_loss, exit_price, reason, unit=0.0, strategy="MORNING_MOMENTUM"):
         unit_pct = (unit / entry_price) if entry_price > 0 else 0.0
         self.raw_signals.append({
             'Ticker': ticker,
-            'Entry Time': entry_dt,
-            'Exit Time': exit_dt,
+            'Entry Time': pd.to_datetime(entry_dt),
+            'Exit Time': pd.to_datetime(exit_dt),
             'Entry Price': entry_price,
             'Stop Loss': stop_loss,
             'Initial Stop': entry_price - (unit / 3.0),
             'Exit Price': exit_price,
             'Reason': reason,
             'Unit': unit,
-            'Unit Pct': unit_pct
+            'Unit Pct': unit_pct,
+            'Strategy': strategy
         })
 
     def run_portfolio_simulation(self):
@@ -240,9 +397,9 @@ class FashionablyLatePortfolio:
         trades_per_day = {}
         
         for sig in self.raw_signals:
-            sig_dt = sig['Entry Time']
-            sig_date = sig_dt.date() if hasattr(sig_dt, 'date') else sig_dt
-            sig_time = sig_dt.time() if hasattr(sig_dt, 'time') else sig_dt
+            sig_dt = pd.to_datetime(sig['Entry Time'])
+            sig_date = sig_dt.date()
+            sig_time = sig_dt.time()
             ticker = sig['Ticker']
             dt_key = str(sig_dt)[:19]
 
@@ -326,6 +483,7 @@ class FashionablyLatePortfolio:
             
             self.executed_trades.append({
                 'Ticker': ticker,
+                'Strategy': sig.get('Strategy', 'MORNING_MOMENTUM'),
                 'Entry Time': sig['Entry Time'],
                 'Exit Time': sig['Exit Time'],
                 'Shares': shares,
@@ -366,6 +524,15 @@ class FashionablyLatePortfolio:
         print(f"Win Rate:          {win_rate:.1f}%")
         print(f"Profit Factor:     {profit_factor}")
         print(f"Max Drawdown:      -{max_dd * 100:.2f}%")
+
+        if 'Strategy' in df.columns and self.enable_dual_engine:
+            print("\n--- PERFORMANCE BY ENGINE ---")
+            for strat, grp in df.groupby('Strategy'):
+                s_wins = grp[grp['Net PnL'] > 0]['Net PnL'].sum()
+                s_loss = abs(grp[grp['Net PnL'] < 0]['Net PnL'].sum())
+                s_pf = round(s_wins / s_loss, 2) if s_loss > 0 else float('inf')
+                s_wr = (len(grp[grp['Net PnL'] > 0]) / len(grp)) * 100
+                print(f" {strat:<24}: {len(grp):3d} Trades | Net: ${grp['Net PnL'].sum():+7.2f} | Win Rate: {s_wr:4.1f}% | PF: {s_pf:4.2f}")
         
         if 'Regime' in df.columns:
             print("\n--- PERFORMANCE BY REGIME ---")
@@ -382,8 +549,8 @@ class FashionablyLatePortfolio:
             t_loss = abs(grp[grp['Net PnL'] < 0]['Net PnL'].sum())
             t_pf = round(t_wins / t_loss, 2) if t_loss > 0 else float('inf')
             t_wr = (len(grp[grp['Net PnL'] > 0]) / len(grp)) * 100
-            t_3r = (grp['Reason'] == 'TARGET_3R').sum()
-            print(f" {t:5s}: {len(grp):2d} Trades | Net: ${grp['Net PnL'].sum():+6.2f} | Win Rate: {t_wr:4.1f}% | PF: {t_pf:4.2f} | 3R Targets: {t_3r:2d}")
+            t_3r = (grp['Reason'].str.contains('TARGET')).sum()
+            print(f" {t:5s}: {len(grp):2d} Trades | Net: ${grp['Net PnL'].sum():+6.2f} | Win Rate: {t_wr:4.1f}% | PF: {t_pf:4.2f} | Targets: {t_3r:2d}")
 
         print("\n--- EXIT REASONS ---")
         print(df['Reason'].value_counts().to_string())
