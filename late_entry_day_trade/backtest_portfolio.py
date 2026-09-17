@@ -25,7 +25,8 @@ class FashionablyLatePortfolio:
         days: int = None,
         index_gate: bool = False,
         require_rs: bool = False,
-        fractional: bool = False
+        fractional: bool = False,
+        enable_chop_stop: bool = False
     ):
         self.tickers = tickers
         self.start_capital = start_capital
@@ -40,6 +41,7 @@ class FashionablyLatePortfolio:
         self.index_gate = index_gate
         self.require_rs = require_rs
         self.fractional = fractional
+        self.enable_chop_stop = enable_chop_stop
         
         self.raw_signals = []
         self.executed_trades = []
@@ -89,8 +91,8 @@ class FashionablyLatePortfolio:
                     in_trade = False
                     continue
                     
-                # 15-Minute Chop Time-Stop
-                if mins_in_trade >= 15:
+                # 15-Minute Chop Time-Stop (disabled by default under NO_CHOP_STOP policy)
+                if self.enable_chop_stop and mins_in_trade >= 15:
                     progress_thresh = entry_price + ((target - entry_price) * 0.3)
                     if row['Close'] < progress_thresh:
                         self._record_signal(ticker, entry_time, current_dt, entry_price, stop_loss, row['Close'], "CHOP_TIME_STOP", unit)

@@ -165,6 +165,11 @@ def parse_args():
         help="Enable fractional share position sizing (matching live Robinhood execution)",
     )
     parser.add_argument(
+        "--enable-chop-stop",
+        action="store_true",
+        help="Enable 15-minute chop time-stop (default: False, NO_CHOP_STOP policy)",
+    )
+    parser.add_argument(
         "--show-trades",
         action="store_true",
         help="Display individual executed trade ledger in terminal",
@@ -183,7 +188,8 @@ def run_intraday_backtest(args, tickers):
     print(" EXECUTING 1-MINUTE INTRADAY SIMULATION (Data Vault)")
     gate_status = "ENABLED (QQQ 50 EMA + Intraday VWAP)" if args.index_gate else "DISABLED"
     rs_status = "ENABLED (20d RS >= 0)" if args.require_rs else "DISABLED"
-    print(f" Universe: {tickers} | Risk: {args.risk}% | 1 Trade/Day Policy | Index Gate: {gate_status} | RS Filter: {rs_status}")
+    chop_status = "ENABLED (15m Time Stop)" if args.enable_chop_stop else "DISABLED (NO_CHOP_STOP Policy)"
+    print(f" Universe: {tickers} | Risk: {args.risk}% | 1 Trade/Day Policy | Chop Stop: {chop_status} | Index Gate: {gate_status} | RS Filter: {rs_status}")
     print("=" * 65)
 
     sim = FashionablyLatePortfolio(
@@ -200,6 +206,7 @@ def run_intraday_backtest(args, tickers):
         index_gate=args.index_gate,
         require_rs=args.require_rs,
         fractional=args.fractional,
+        enable_chop_stop=args.enable_chop_stop,
     )
     sim.generate_signals()
     sim.run_portfolio_simulation()

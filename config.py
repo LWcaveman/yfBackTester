@@ -55,7 +55,7 @@ ETF_SYMBOLS = {
 
 # Curated Elite Day-Trading Universe (Optimized for 9 EMA / VWAP 3R Setup)
 DAYTRADE_TICKERS = [
-    "ARM", "HOOD", "PLTR", "AMZN", "AAPL", "GOOGL"
+    "CONL", "SOXL", "TQQQ", "PLTR", "RBLX", "AMZN", "AAPL", "ARM", "GOOGL"
 ]
 
 # Benchmark & Index Anchors
@@ -68,13 +68,14 @@ INVERSE_TICKERS = [
     "SH", "PSQ"
 ]
 
-# Extended Universe for Multi-Year Vault (10 tickers)
+# Extended Universe for Multi-Year Vault
 DAYTRADE_EXTENDED_UNIVERSE = DAYTRADE_TICKERS + INDEX_TICKERS + INVERSE_TICKERS
 
 # Day-Trading Edge Parameters (Small Cash Account Optimized)
 DEFAULT_DAYTRADE_MIN_CLOSE_PCT: float = 0.60
 DEFAULT_DAYTRADE_MIN_VOL_RATIO: float = 0.80
 DEFAULT_DAYTRADE_RATCHET_1_5R: bool = True
+DEFAULT_DAYTRADE_ENABLE_CHOP_STOP: bool = False  # NO_CHOP_STOP policy verified by 2-yr backtest
 
 # Market Scanner Universe (market_scanner.py)
 SCANNER_TICKERS = [
