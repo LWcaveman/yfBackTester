@@ -150,6 +150,16 @@ def parse_args():
         help="Alpaca data feed type (default: sip)",
     )
     parser.add_argument(
+        "--index-gate",
+        action="store_true",
+        help="Enable Market Regime Index Gate (QQQ > 50 EMA allows ARM/HOOD; QQQ <= 50 EMA blocks them and enables PSQ/SH)",
+    )
+    parser.add_argument(
+        "--fractional",
+        action="store_true",
+        help="Enable fractional share position sizing (matching live Robinhood execution)",
+    )
+    parser.add_argument(
         "--show-trades",
         action="store_true",
         help="Display individual executed trade ledger in terminal",
@@ -166,7 +176,8 @@ def parse_args():
 def run_intraday_backtest(args, tickers):
     print("\n" + "=" * 65)
     print(" EXECUTING 1-MINUTE INTRADAY SIMULATION (Data Vault)")
-    print(f" Universe: {tickers} | Risk: {args.risk}% | 1 Trade/Day Policy")
+    gate_status = "ENABLED (QQQ 50 EMA)" if args.index_gate else "DISABLED"
+    print(f" Universe: {tickers} | Risk: {args.risk}% | 1 Trade/Day Policy | Index Gate: {gate_status}")
     print("=" * 65)
 
     sim = FashionablyLatePortfolio(
@@ -180,6 +191,8 @@ def run_intraday_backtest(args, tickers):
         min_vol_ratio=args.min_vol_ratio,
         ratchet_1_5r=not args.no_ratchet,
         days=args.days,
+        index_gate=args.index_gate,
+        fractional=args.fractional,
     )
     sim.generate_signals()
     sim.run_portfolio_simulation()

@@ -17,7 +17,9 @@ class FashionablyLatePortfolio:
         min_close_pct: float = 0.60,
         min_vol_ratio: float = 0.80,
         ratchet_1_5r: bool = True,
-        days: int = None
+        days: int = None,
+        index_gate: bool = False,
+        fractional: bool = False
     ):
         self.tickers = tickers
         self.start_capital = start_capital
@@ -29,6 +31,8 @@ class FashionablyLatePortfolio:
         self.min_vol_ratio = min_vol_ratio
         self.ratchet_1_5r = ratchet_1_5r
         self.days = days
+        self.index_gate = index_gate
+        self.fractional = fractional
         
         self.raw_signals = []
         self.executed_trades = []
@@ -145,6 +149,21 @@ class FashionablyLatePortfolio:
         # Sort all theoretical setups chronologically to mimic live market execution
         self.raw_signals.sort(key=lambda x: x['Entry Time'])
         
+        # Load QQQ daily indicators if Index Gate is enabled
+        qqq_regime = {}
+        if self.index_gate:
+            print("Applying Index Gate (QQQ Daily 50 EMA Regime Filter)...")
+            try:
+                import yfinance as yf
+                qqq_df = yf.download("QQQ", period="3y", interval="1d", progress=False)
+                if isinstance(qqq_df.columns, pd.MultiIndex):
+                    qqq_df.columns = qqq_df.columns.get_level_values(0)
+                qqq_df["EMA_50"] = qqq_df["Close"].ewm(span=50, adjust=False).mean()
+                qqq_df["Above_50EMA"] = qqq_df["Close"].shift(1) > qqq_df["EMA_50"].shift(1)
+                qqq_regime = dict(zip(pd.to_datetime(qqq_df.index).date, qqq_df["Above_50EMA"]))
+            except Exception as e:
+                print(f"Warning: Could not fetch QQQ regime data ({e}), continuing without gate.")
+
         equity = self.start_capital
         peak_equity = equity
         max_drawdown = 0.0
@@ -160,6 +179,20 @@ class FashionablyLatePortfolio:
             if trades_per_day.get(sig_date, 0) >= self.max_trades_per_day:
                 continue
 
+            # Enforce Index Gate Regime Logic
+            if self.index_gate and qqq_regime:
+                is_bull = qqq_regime.get(sig_date, True)
+                if not is_bull:
+                    # Bear / Correction Regime (QQQ <= 50 EMA):
+                    # Block high-beta growth stocks that drag during pullbacks
+                    if sig['Ticker'] in ['ARM', 'HOOD']:
+                        continue
+                else:
+                    # Bull Expansion Regime (QQQ > 50 EMA):
+                    # Block inverse ETFs (don't short in a bull market)
+                    if sig['Ticker'] in ['PSQ', 'SH']:
+                        continue
+
             # Enforce Afternoon Tight Unit Filter
             if sig_time > self.morning_cutoff:
                 if sig.get('Unit Pct', 0.0) > self.midday_max_unit_pct:
@@ -174,11 +207,14 @@ class FashionablyLatePortfolio:
             
             # Position Sizing Math
             risk_amount = equity * self.risk_pct
-            shares = int(risk_amount / stop_dist)
-            
-            # Constraint: Cannot buy more shares than available account cash
-            max_shares_cash = int(equity / sig['Entry Price'])
-            shares = min(shares, max_shares_cash)
+            if self.fractional:
+                shares = round(risk_amount / stop_dist, 4)
+                max_shares_cash = round(equity / sig['Entry Price'], 4)
+                shares = min(shares, max_shares_cash)
+            else:
+                shares = int(risk_amount / stop_dist)
+                max_shares_cash = int(equity / sig['Entry Price'])
+                shares = min(shares, max_shares_cash)
             
             if shares <= 0:
                 continue
