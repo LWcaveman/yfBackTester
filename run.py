@@ -33,6 +33,9 @@ from config import (
     DEFAULT_DAYTRADE_BUYING_POWER_MULT,
     DEFAULT_DAYTRADE_INDEX_GATE,
     DEFAULT_DAYTRADE_FRACTIONAL,
+    DEFAULT_VWAP_RECLAIM_TICKERS,
+    DEFAULT_DAYTRADE_PRIORITY_MODE,
+    DEFAULT_DAYTRADE_REGIME_ROUTING,
 )
 from data_loader import get_historical_data
 from data_vault import sync_watchlist, get_vault_stats
@@ -41,6 +44,7 @@ from strategies.ema_shelf import EMAShelfStrategy
 from strategies.vwap_shelf import VWAPEMAShelfStrategy
 from portfolio_engine import PortfolioBacktester
 from late_entry_day_trade.backtest_portfolio import FashionablyLatePortfolio
+from vwap_reclaim.backtest import VWAPReclaimPortfolio
 
 
 def parse_args():
@@ -50,9 +54,9 @@ def parse_args():
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["vwap", "ema", "daytrade"],
+        choices=["vwap", "ema", "daytrade", "vwap-reclaim"],
         default="vwap",
-        help="Strategy to test: 'vwap' (Weekly VWAP + 20 EMA + RS), 'ema' (20 EMA / 50 SMA Pullback), or 'daytrade' (9 EMA / VWAP Crossover 1m Intraday)",
+        help="Strategy to test: 'vwap', 'ema', 'daytrade' (9 EMA / VWAP Crossover + VWAP Reclaim), or 'vwap-reclaim' (Pure VWAP Reclaim)",
     )
     parser.add_argument(
         "--tickers",
@@ -206,6 +210,42 @@ def parse_args():
         help="Enable partial scale-out (bank 33% at +1.5R, move stop to breakeven, runner to 4.0R)",
     )
     parser.add_argument(
+        "--enable-morning-momentum",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Morning 9 EMA / VWAP Momentum engine (Engine 1)",
+    )
+    parser.add_argument(
+        "--enable-vwap-reclaim",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Morning VWAP Reclaim engine (Engine 3) alongside 9 EMA crossover",
+    )
+    parser.add_argument(
+        "--deposit",
+        type=float,
+        default=0.0,
+        help="Weekly fresh capital deposit injection (e.g. 15.0 for $15/week compounding)",
+    )
+    parser.add_argument(
+        "--reclaim-tickers",
+        nargs="+",
+        default=None,
+        help="Ticker symbols for Morning VWAP Reclaim engine (default: DEFAULT_VWAP_RECLAIM_TICKERS from config)",
+    )
+    parser.add_argument(
+        "--priority",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DAYTRADE_PRIORITY_MODE,
+        help="Prioritize early VWAP Reclaim setups, falling back to Late Entry (default: True)",
+    )
+    parser.add_argument(
+        "--regime-routing",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DAYTRADE_REGIME_ROUTING,
+        help="Route strategy by regime: Bull (QQQ > 50 EMA) -> Late Entry; Bear (QQQ <= 50 EMA) -> VWAP Reclaim (default: True)",
+    )
+    parser.add_argument(
         "--morning-cutoff",
         type=str,
         default=DEFAULT_DAYTRADE_MORNING_CUTOFF,
@@ -226,21 +266,34 @@ def parse_args():
 
 
 def run_intraday_backtest(args, tickers):
+    reclaim_tickers = args.reclaim_tickers if args.reclaim_tickers else DEFAULT_VWAP_RECLAIM_TICKERS
     print("\n" + "=" * 65)
     print(" EXECUTING 1-MINUTE INTRADAY SIMULATION (Data Vault)")
     gate_status = "ENABLED (QQQ 50 EMA + Intraday VWAP)" if args.index_gate else "DISABLED"
     rs_status = "ENABLED (20d RS >= 0)" if args.require_rs else "DISABLED"
     chop_status = "ENABLED (15m Time Stop)" if args.enable_chop_stop else "DISABLED (NO_CHOP_STOP Policy)"
     dual_status = "ENABLED (Morning Momentum + Midday VWAP Reversion)" if args.enable_dual_engine else "DISABLED"
+    reclaim_status = "ENABLED (Morning Liquidity Sweep & Reclaim)" if args.enable_vwap_reclaim else "DISABLED"
+    momentum_status = "ENABLED (9 EMA / VWAP Crossover)" if args.enable_morning_momentum else "DISABLED"
     scale_status = "ENABLED (Scale 33% @ 1.5R, Runner to 4.0R)" if args.enable_partial_scale else "DISABLED (Pure 3.0R Target)"
-    print(f" Universe: {tickers}")
-    print(f" Risk: {args.risk}% | Max Trades/Day: {args.max_trades} | Buying Power: {args.buying_power_mult}x | Morning Cutoff: {args.morning_cutoff}")
+    priority_status = "ENABLED (Reclaim First -> Late Entry Fallback)" if args.priority else "DISABLED"
+    routing_status = "ENABLED (Bull: Late Entry / Bear: VWAP Reclaim)" if args.regime_routing else "DISABLED"
+    print(f" Late Entry Universe: {tickers}")
+    if args.enable_vwap_reclaim:
+        print(f" VWAP Reclaim Universe: {reclaim_tickers}")
+        print(f" Regime Routing: {routing_status} | Priority Fallback: {priority_status}")
+    print(f" Capital: ${args.capital:.2f} | Weekly Deposit: ${args.deposit:.2f} | Risk: {args.risk}%")
+    print(f" Max Trades/Day: {args.max_trades} | Buying Power: {args.buying_power_mult}x | Morning Cutoff: {args.morning_cutoff}")
+    print(f" Morning Momentum: {momentum_status} | VWAP Reclaim: {reclaim_status}")
     print(f" Dual-Engine: {dual_status} | Partial Scale: {scale_status}")
     print(f" Chop Stop: {chop_status} | Index Gate: {gate_status} | RS Filter: {rs_status}")
     print("=" * 65)
 
     sim = FashionablyLatePortfolio(
         tickers=tickers,
+        reclaim_tickers=reclaim_tickers,
+        priority_mode=args.priority,
+        enable_regime_routing=args.regime_routing,
         start_capital=args.capital,
         risk_pct=args.risk / 100.0,
         max_trades_per_day=args.max_trades,
@@ -255,8 +308,11 @@ def run_intraday_backtest(args, tickers):
         fractional=args.fractional,
         enable_chop_stop=args.enable_chop_stop,
         enable_dual_engine=args.enable_dual_engine,
+        enable_morning_momentum=args.enable_morning_momentum,
+        enable_vwap_reclaim=args.enable_vwap_reclaim,
         enable_partial_scale=args.enable_partial_scale,
         buying_power_mult=args.buying_power_mult,
+        weekly_deposit=args.deposit,
     )
     sim.generate_signals()
     sim.run_portfolio_simulation()
@@ -264,7 +320,7 @@ def run_intraday_backtest(args, tickers):
     if args.show_trades and sim.executed_trades:
         print("\n--- INTRADAY TRADE LEDGER ---")
         df_trades = pd.DataFrame(sim.executed_trades)
-        display_cols = ["Ticker", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Shares", "Net PnL", "Reason"]
+        display_cols = ["Ticker", "Strategy", "Entry Time", "Exit Time", "Entry Price", "Exit Price", "Shares", "Net PnL", "Reason"]
         cols_present = [c for c in display_cols if c in df_trades.columns]
         print(tabulate(df_trades[cols_present], headers="keys", tablefmt="github", showindex=False))
 
@@ -381,6 +437,29 @@ def main():
     if args.strategy == "daytrade":
         tickers = args.tickers if args.tickers else DAYTRADE_TICKERS
         run_intraday_backtest(args, tickers)
+    elif args.strategy == "vwap-reclaim":
+        tickers = args.tickers if args.tickers else DEFAULT_VWAP_RECLAIM_TICKERS
+        print("\n" + "=" * 65)
+        print(" EXECUTING PURE VWAP RECLAIM INTRADAY SIMULATION")
+        print(f" Universe: {tickers}")
+        print(f" Capital: ${args.capital:.2f} | Weekly Deposit: ${args.deposit:.2f}")
+        print("=" * 65)
+        port = VWAPReclaimPortfolio(
+            tickers=tickers,
+            start_capital=args.capital,
+            weekly_deposit=args.deposit,
+            days=args.days
+        )
+        port.generate_signals()
+        port.run_portfolio_simulation()
+        if args.show_trades and port.executed_trades:
+            print("\n--- VWAP RECLAIM TRADE LEDGER ---")
+            df_trades = pd.DataFrame(port.executed_trades)
+            print(tabulate(df_trades, headers="keys", tablefmt="github", showindex=False))
+        if args.output and port.executed_trades:
+            df_trades = pd.DataFrame(port.executed_trades)
+            df_trades.to_csv(args.output, index=False)
+            print(f"Trade ledger exported to {args.output}")
     else:
         tickers = args.tickers if args.tickers else EXPANDED_UNIVERSE
         run_swing_backtest(args, tickers)

@@ -48,6 +48,9 @@ yfBackTester/
 │   ├── data_engine_portfolio.py       # Multi-ticker portfolio 1m data loader
 │   ├── backtest.py                    # Single-ticker intraday simulation engine
 │   └── backtest_portfolio.py          # Chronological multi-ticker portfolio intraday simulator
+├── vwap_reclaim/                      # Morning VWAP Liquidity Sweep & Reclaim system
+│   ├── engine.py                      # Core VWAP Reclaim detection engine
+│   └── backtest.py                    # Standalone VWAP Reclaim runner with compounding support
 └── charts/
     └── download_chart.py              # CLI utility for downloading clean 2-year daily CSV charts
 ```
@@ -81,7 +84,14 @@ yfBackTester/
 * **Macro Context:** Intraday price is within 3% of the Daily 5-period or 10-period SMA (calculated using yesterday's close to eliminate lookahead bias).
 * **Target & Risk:** Measured move targeting $3R$ reward ($Unit = Entry - LOD$, $Stop = Entry - Unit / 3$).
 * **15-Minute Chop Bailout:** If price fails to advance at least 30% towards target within 15 minutes, exits at market close.
-* **Curated Elite Universe:** Optimized for institutional follow-through and orderly momentum (`ARM`, `HOOD`, `PLTR`, `AMZN`, `AAPL`, `GOOGL`), delivering a 70.8% win rate and 4.17 profit factor.
+* **Curated Elite Universe:** Optimized for institutional follow-through and orderly momentum (`TSLL`, `NVDL`, `CONL`, `TQQQ`, `PLTR`, `RBLX`, `MARA`, `SOFI`).
+
+### 4. Morning VWAP Liquidity Sweep & Reclaim (`vwap_reclaim/`)
+* **Execution Window:** 9:40 AM – 11:15 AM (Catches early liquidity flush recoveries before the 10:00 AM momentum crossover).
+* **The Sweep:** Price dips below intraday VWAP for $\ge 2$ consecutive bars, establishing a shallow sweep low (between 0.3% and 2.5% below VWAP).
+* **The Reclaim Trigger:** 1-minute candle forcefully crosses back above VWAP with bullish range defense ($\ge 60\%$ close) and institutional volume ($\ge 0.8\times$ 10-bar SMA).
+* **Market Tide Confirmation:** Requires `SPY` trading above intraday VWAP for long entries (or `QQQ` below VWAP for inverse short entries).
+* **Risk & Exits:** Initial stop at the sweep low (capped between 0.6% and 2.5%), partial scale of 33% at $+1.5R$ with stop ratcheted to Breakeven, and runner targeting $+4.0R$.
 
 ---
 
@@ -104,13 +114,28 @@ Run the Pure EMA Pullback strategy on specific tickers with trade ledger output:
 python run.py --strategy ema --tickers SPY QQQ NVDA AAPL --start 2023-01-01 --show-trades
 ```
 
-Run the 1-minute Intraday Day-Trading strategy from the local SQLite Data Vault:
+Run the Small Cash Account Compounding simulation ($70 start + $15/week deposits):
 ```bash
-# Backtest across all data currently in the vault
-python run.py --strategy daytrade --show-trades
+# Native Regime-Routed Mode (Bull: Late Entry Momentum / Bear: VWAP Reclaim) - 1 Trade/Day T+1 Safe
+python run.py --strategy daytrade --capital 1000
 
-# Backtest across a specific lookback window (e.g. 250 trading days / 1 year)
-python run.py --strategy daytrade --days 250 --show-trades
+# Small Cash Account Compounding ($70 Start + $15/wk deposit, 1 Trade/Day, Zero GFV)
+python run.py --strategy daytrade --capital 70 --deposit 15 --show-trades
+
+# Standalone Pure Late Entry Momentum (Original 8 tickers: TSLL, NVDL, CONL, TQQQ, PLTR, RBLX, AAPL, AMZN)
+python run.py --strategy daytrade --capital 1000 --no-enable-vwap-reclaim
+
+# Standalone Pure VWAP Reclaim simulation (Sweeper tickers: CONL, SOFI, MARA, PLTR)
+python run.py --strategy vwap-reclaim --capital 1000 --show-trades
+
+# Direct VWAP Reclaim module runner
+python vwap_reclaim/backtest.py --capital 70 --deposit 15 --days 250
+```
+
+Run the 1-minute Intraday Day-Trading strategy with custom universes:
+```bash
+# Override universes explicitly via CLI
+python run.py --strategy daytrade --tickers TSLL NVDL CONL TQQQ PLTR RBLX AAPL AMZN --reclaim-tickers CONL SOFI MARA PLTR
 ```
 
 View Data Vault database status and coverage:
