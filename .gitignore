@@ -5,7 +5,9 @@ __pycache__/
 *.so
 
 # Virtual Environments
+venv
 venv/
+.venv
 .venv/
 env/
 ENV/
@@ -25,6 +27,7 @@ venv.bak/
 *.sqlite
 *.log
 *.csv
+data
 data/
 *.pid
 
